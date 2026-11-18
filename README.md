@@ -39,6 +39,9 @@ Each session has an access mode, switchable at any time from the icon under the 
 
 - **Full access** (default) — Claude Code in `bypassPermissions`, Codex without a sandbox, exactly as if you ran them
   in a terminal yourself.
+- **Auto** — Claude Code's own `auto` permission mode: routine actions run, risky ones are checked by Claude Code and,
+  when it is unsure, you get an Allow / Deny card in Yune. Codex runs like `codex --full-auto` (`workspace-write`
+  sandbox, network allowed).
 - **Ask** — Claude Code asks you in Yune (Allow / Deny) before editing files or running commands; reading and searching
   need no approval. Codex runs in the `workspace-write` sandbox (edits only inside the project, no network), since
   `codex exec` cannot ask per action.

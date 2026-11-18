@@ -98,8 +98,9 @@ EFFORTS = agents.EFFORTS
 DEFAULT_MODEL, DEFAULT_EFFORT = agents.DEFAULTS["claude"]
 EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "Delete")
 # Режим доступа сессии: full — без вопросов (по умолчанию), ask — изменяющее с разрешения владельца, read — только чтение
-ACCESS = ("full", "ask", "read")
-SDK_MODE = {"full": "bypassPermissions", "ask": "default", "read": "default"}
+# auto (владелец 18.11.2026) — режим auto Claude Code: безопасное он выполняет сам, сомнительное — спросит (can_use_tool → карточка)
+ACCESS = ("full", "auto", "ask", "read")
+SDK_MODE = {"full": "bypassPermissions", "auto": "auto", "ask": "default", "read": "default"}
 # Чтение, поиск и служебное — без вопросов в любом режиме. Остальное (Bash, Edit, Write, MultiEdit, NotebookEdit,
 # неизвестные и сторонние инструменты) — изменяющее: в «Спрашивать» — карточка, в «Только чтение» — отказ
 READ_TOOLS = frozenset({
@@ -129,6 +130,8 @@ ACCESS_NOTE = {  # i18n: model
            "на сайте; запретил — не повторяй то же действие в обход, спроси или предложи другое.]",
     "read": "[Режим доступа сессии: только чтение — правки файлов и команды запрещены; читай, ищи, объясняй и предлагай "
             "правки текстом.]",
+    "auto": "[Режим доступа сессии: авто — обычные правки и команды выполняются сами, рискованные Claude Code сначала "
+            "проверяет; если спросит владельца — запретил, не повторяй то же действие в обход.]",
 }
 DENY_READ = ("Режим сессии «Только чтение»: правки файлов и команды запрещены владельцем. Не пытайся обойти — "  # i18n: model
              "предложи правку текстом.")
@@ -286,6 +289,7 @@ class Session:
 
     steer = True                            # сообщение посреди хода агент берёт на следующем шаге (у Codex — нет)
     access_notes = ACCESS_NOTE              # о режиме доступа — агенту (у Codex — про песочницу)
+    access_modes = ACCESS                   # какие режимы показать на сайте (старые мосты поля не шлют — три прежних)
 
     # ── карточка и события ──────────────────────────────────────────────────
 
@@ -302,7 +306,7 @@ class Session:
                            "parts": [t for t in q.get("parts") or [] if t] or None, "hold": bool(q.get("hold"))} for q in self.outbox],
                 "resume_at": r.get("resume_at"), "steer": self.steer,
                 # режим доступа: поле есть — мост умеет режимы (сайт показывает значок под полем; старые мосты — без него)
-                "access": self.access}
+                "access": self.access, "access_modes": list(self.access_modes)}
 
     @property
     def access(self) -> str:
@@ -596,8 +600,8 @@ class Session:
         мнения ({}); read — отказ сразу; ask — «спросить»: вызов уходит в can_use_tool, там ждём владельца."""
         name = str((data or {}).get("tool_name") or "")
         access = self.access
-        if access == "full" or reads(name):
-            return {}
+        if access in ("full", "auto") or reads(name):
+            return {}                           # auto — решает сам Claude Code; спросит — придёт в can_use_tool
         if access == "read":
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": DENY_READ}}
@@ -647,7 +651,7 @@ class Session:
             return
         self.bridge.update(self.id, access=access)
         await self._apply_access()
-        if access != "ask":
+        if access in ("full", "read"):
             verdict = {"decision": "allow" if access == "full" else "deny"}
             for rid, (kind, fut) in list(self.pending.items()):
                 if kind == "permission" and not fut.done():

@@ -47,12 +47,16 @@ ACCESS_ARGS = {
     "ask": ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
             "-c", "sandbox_workspace_write.network_access=false"],
     "read": ["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"'],
+    # auto — как codex --full-auto: песочница проекта, сеть открыта (подтверждать в exec некому)
+    "auto": ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
+             "-c", "sandbox_workspace_write.network_access=true"],
 }
 ACCESS_NOTE = {  # i18n: model
     "full": "[Режим доступа сессии: полный — без песочницы.]",
     "ask": "[Режим доступа сессии: песочница — правки только в папке проекта, сеть закрыта.]",
     "read": "[Режим доступа сессии: только чтение — песочница не даст менять файлы; читай, ищи, объясняй и предлагай "
             "правки текстом.]",
+    "auto": "[Режим доступа сессии: авто — правки только в папке проекта, сеть открыта.]",
 }
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 

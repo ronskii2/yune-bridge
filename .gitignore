@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.zip
+claude_bridge/build.txt
+claude_bridge/host.py
+.DS_Store

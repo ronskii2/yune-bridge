@@ -1,0 +1,4 @@
+# SDK from source: the PyPI wheel bundles its own Claude Code CLI (~160 MB); the bridge uses the claude already installed
+--no-binary claude-agent-sdk
+aiohttp>=3.9
+claude-agent-sdk

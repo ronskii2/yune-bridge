@@ -12,7 +12,7 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py)
   GET  /projects                     проекты для новой сессии
   GET  /sessions                     список сессий
-  POST /sessions                     {project, agent?, model?, effort?} → сессия
+  POST /sessions                     {project, agent?, model?, effort?, access?} → сессия
   GET  /sessions/{id}?before=&limit= сессия + события
   POST /sessions/{id}/send           {text, files?: [fid], answer?: {mode, rules, short}, mode?: auto | now | later}
                                      answer — режим ответа на сайте; агент работает — сообщение в очередь (auto)
@@ -22,9 +22,10 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /sessions/{id}/files/{fid}    файл сессии (присланный владельцем или показанный Claude)
   POST /sessions/{id}/answer         {rid, answers: {вопрос: ответ}}
   POST /sessions/{id}/secret         {rid, value} | {rid, cancel: true}
+  POST /sessions/{id}/permit         {rid, decision: allow | deny | all, text?}   ответ на просьбу разрешения (режим ask)
   POST /sessions/{id}/stop | delete
   POST /sessions/{id}/rename         {title, if_title?}   if_title — только если название всё ещё такое (автоназвание)
-  POST /sessions/{id}/settings       {model?, effort?}
+  POST /sessions/{id}/settings       {model?, effort?, access?: full | ask | read}   access — режим доступа сессии
   POST /sessions/{id}/handoff        {agent, model?, effort?} → новая сессия с выжимкой этой
   GET  /events                       SSE: все события всех сессий
 """
@@ -130,7 +131,7 @@ def make_app(bridge: Bridge) -> web.Application:
             if not card:
                 raise BridgeError("нет такого проекта")
             session = bridge.create(project, body.get("model"), body.get("effort"), str(body.get("agent") or "claude"),
-                                    intro=device_note(body.get("device")))
+                                    intro=device_note(body.get("device")), access=body.get("access"))
         except BridgeError as e:
             return _error(str(e))
         return _json({"ok": True, "session": session.public()})
@@ -186,6 +187,12 @@ def make_app(bridge: Bridge) -> web.Application:
                 if value is not None and not value.strip():
                     return _error("пустой ключ")
                 session.resolve(str(body.get("rid")), "secret", value)
+            elif name == "permit":
+                decision = body.get("decision")
+                if decision not in ("allow", "deny", "all"):
+                    return _error("decision — allow | deny | all")
+                said = " ".join(str(body.get("text") or "").split())[:2000] if decision == "deny" else ""
+                session.resolve(str(body.get("rid")), "permission", {"decision": decision, "text": said})
             elif name == "stop":
                 await session.stop()
             elif name == "rename":
@@ -196,6 +203,8 @@ def make_app(bridge: Bridge) -> web.Application:
                     bridge.update(session.id, title=title)
             elif name == "settings":
                 await session.configure(body.get("model"), body.get("effort"))
+                if body.get("access"):
+                    await session.set_access(str(body["access"]))
             elif name == "delete":
                 await bridge.delete(session.id)
                 return _json({"ok": True})

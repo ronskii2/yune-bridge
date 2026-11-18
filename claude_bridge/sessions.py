@@ -1,7 +1,8 @@
 """Сессии Claude Code с сайта (Yune, «Подключения»): живой процесс `claude` на сессию через Claude Agent SDK.
 
-Процесс — тот же Claude Code, что в терминале (`~/.local/bin/claude`, вход по подписке, bypassPermissions, настройки
-и скиллы пользователя): Claude решает всё сам, карточек «Разрешить?» нет. Наружу — ровная лента событий:
+Процесс — тот же Claude Code, что в терминале (`~/.local/bin/claude`, вход по подписке, настройки и скиллы
+пользователя): по умолчанию (режим доступа full, bypassPermissions) Claude решает всё сам; «Разрешить?» — только в
+режиме ask (ниже). Наружу — ровная лента событий:
 
   user        сообщение владельца                      text        реплика или ответ Claude (готовый блок)
   tool        вызов тула: tid, name, input (обрезан)
@@ -10,6 +11,8 @@
   secret_done ключ записан / отказ: rid, ok, …         result      ход закончен: cost, ms, turns, error
   note        служебное («контекст сжат», «остановлено»)  error   ошибка процесса/модели
   file        Claude показал файл (mcp__lozhka__send_file): fid, name, mime, size, caption
+  permission  агент просит разрешения (режим «Спрашивать»): rid, name, input (обрезан)
+  permit      ответ владельца на просьбу: rid, decision allow | deny | all, text — что сказал агенту вместо
   limit       лимит подписки: status warning (used — доля, resets_at) | rejected (ход упал, text — как написал Claude
               Code) | overage; type — five_hour | seven_day | …
   (у user — files: [{fid, name, mime, size}] — что владелец приложил; Claude получает их пути строкой; auto: resume —
@@ -21,6 +24,15 @@ Code получает его скрытым (thinking display omitted) — св�
 Только вживую (в базу не пишутся): delta — текст ответа по мере набора: add — дописанное с позиции at, раз в
 DELTA_FULL_SEC — text целиком (подключились посреди ответа — догоняют по нему); status — idle/running/waiting,
 context — заполненность контекста, session — карточка сессии изменилась.
+
+Режим доступа сессии (столбец access, меняется в любой момент, сайт — значком под полем; владелец 18.11.2026):
+  full — по умолчанию, как было: bypassPermissions, без вопросов;
+  ask  — правки и команды — с разрешения владельца: permission_mode default, хук PreToolUse отдаёт изменяющие инструменты
+         в can_use_tool (решение «ask» — даже если их разрешают allow-правила настроек), там — карточка на сайте и ожидание,
+         как у AskUserQuestion; чтение и поиск — без вопросов; «Разрешить всё в этой сессии» — режим full;
+  read — только чтение: хук сразу отказывает изменяющим инструментам (и тем, что разрешены allow-правилами).
+Claude Code меняет режим сразу (set_permission_mode живому процессу; хук и can_use_tool читают режим на каждом вызове),
+Codex — со следующего хода (codex_session: песочница workspace-write / read-only вместо --dangerously-bypass…).
 
 Вопрос с вариантами (AskUserQuestion) приходит в can_use_tool даже в bypassPermissions (проверено 04.11.2026) —
 ход ждёт ответа владельца с сайта. Местное расширение (extension.py) может добавить свои тулы — например, запрос
@@ -55,8 +67,8 @@ import warnings
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow, PermissionResultDeny,
-                              create_sdk_mcp_server, tool)
+from claude_agent_sdk import (ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, PermissionResultAllow,
+                              PermissionResultDeny, create_sdk_mcp_server, tool)
 from claude_agent_sdk.types import (AssistantMessage, ResultMessage, StreamEvent, SystemMessage, TextBlock,
                                     ToolResultBlock, ToolUseBlock, UserMessage)
 try:                                 # мост на ПК может стоять со старым SDK — без событий лимита
@@ -85,6 +97,43 @@ MODELS = agents.CLAUDE_MODELS
 EFFORTS = agents.EFFORTS
 DEFAULT_MODEL, DEFAULT_EFFORT = agents.DEFAULTS["claude"]
 EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "Delete")
+# Режим доступа сессии: full — без вопросов (по умолчанию), ask — изменяющее с разрешения владельца, read — только чтение
+ACCESS = ("full", "ask", "read")
+SDK_MODE = {"full": "bypassPermissions", "ask": "default", "read": "default"}
+# Чтение, поиск и служебное — без вопросов в любом режиме. Остальное (Bash, Edit, Write, MultiEdit, NotebookEdit,
+# неизвестные и сторонние инструменты) — изменяющее: в «Спрашивать» — карточка, в «Только чтение» — отказ
+READ_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite", "Task", "Agent", "ToolSearch",
+    "BashOutput", "TaskOutput", "KillShell", "KillBash", "ListMcpResourcesTool", "ReadMcpResourceTool", "Skill",
+    "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+    "mcp__lozhka__send_file",                                   # показать файл; тулы расширения — extension READ_TOOLS
+})
+# Инструменты MCP по глаголу в имени: get_issue, list_pages, image_list, job_status, fetch_url — чтение
+READ_VERBS = frozenset({"get", "list", "read", "search", "find", "fetch", "view", "describe", "status", "guide",
+                        "lookup"})
+
+
+def reads(name: str) -> bool:
+    """Инструмент только читает: без вопросов и в «Только чтение»."""
+    if name in READ_TOOLS or name in (extension.attr("READ_TOOLS") or ()):
+        return True
+    if name.startswith("mcp__") and name.count("__") >= 2:
+        words = [w for w in re.split(r"[_\-]+", name.split("__", 2)[2].lower()) if w]
+        return bool(words) and (words[0] in READ_VERBS or words[-1] in READ_VERBS)
+    return False
+
+
+ACCESS_NOTE = {  # i18n: model
+    "full": "[Режим доступа сессии: полный — правки и команды без подтверждений.]",
+    "ask": "[Режим доступа сессии: «Спрашивать» — перед правкой файлов и командами владелец подтверждает каждое действие "
+           "на сайте; запретил — не повторяй то же действие в обход, спроси или предложи другое.]",
+    "read": "[Режим доступа сессии: только чтение — правки файлов и команды запрещены; читай, ищи, объясняй и предлагай "
+            "правки текстом.]",
+}
+DENY_READ = ("Режим сессии «Только чтение»: правки файлов и команды запрещены владельцем. Не пытайся обойти — "  # i18n: model
+             "предложи правку текстом.")
+DENY_ASK = "Владелец запретил это действие."  # i18n: model
+DENY_SAID = "Владелец запретил это действие и написал: {}"  # i18n: model
 RESUME_GAP = 60                     # автопродолжение — через минуту после обновления лимита
 RETRY_SEC = 30 * 60                 # когда обновится, неизвестно (Codex, текст без времени) — пробуем раз в полчаса
 RESUME = "Лимит восстановился — продолжай с того места, где остановился."  # i18n: model
@@ -154,7 +203,8 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS outbox_session_idx ON outbox (session, ts);
 """
 # Столбцы, добавленные позже (SQLite: ADD COLUMN без IF NOT EXISTS — проверяем сами)
-COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin": "TEXT", "resume_at": "REAL"}
+COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin": "TEXT", "resume_at": "REAL",
+           "access": "TEXT NOT NULL DEFAULT 'full'"}
 
 
 class BridgeError(Exception):
@@ -232,8 +282,10 @@ class Session:
         self.turn_failed = False            # ход упал (ошибка, лимит) — очередь тоже ждёт
         self.auto_resume = False            # ход запущен автопродолжением: снова лимит — ждём следующего окна
         self.limit_reset: float | None = None
+        self.access_told: str | None = None     # режим доступа, о котором агент уже знает в этом процессе моста
 
     steer = True                            # сообщение посреди хода агент берёт на следующем шаге (у Codex — нет)
+    access_notes = ACCESS_NOTE              # о режиме доступа — агенту (у Codex — про песочницу)
 
     # ── карточка и события ──────────────────────────────────────────────────
 
@@ -248,7 +300,13 @@ class Session:
                 "pending": [{"rid": rid, "kind": kind} for rid, (kind, _f) in self.pending.items()],
                 "queue": [{"qid": q["qid"], "ts": q["ts"], "text": q["text"], "files": q.get("files_info") or [],
                            "parts": [t for t in q.get("parts") or [] if t] or None, "hold": bool(q.get("hold"))} for q in self.outbox],
-                "resume_at": r.get("resume_at"), "steer": self.steer}
+                "resume_at": r.get("resume_at"), "steer": self.steer,
+                # режим доступа: поле есть — мост умеет режимы (сайт показывает значок под полем; старые мосты — без него)
+                "access": self.access}
+
+    @property
+    def access(self) -> str:
+        return self.row.get("access") if self.row.get("access") in ACCESS else "full"
 
     def _event(self, data: dict) -> None:
         if data.get("kind") == "error" or (data.get("kind") == "limit" and data.get("status") == "rejected"):
@@ -297,7 +355,9 @@ class Session:
         r = self.row
         return ClaudeAgentOptions(
             cli_path=CLI, cwd=r["cwd"], model=MODELS.get(r["model"], MODELS[DEFAULT_MODEL])[1], effort=r["effort"],
-            permission_mode="bypassPermissions", can_use_tool=self._can_use_tool,
+            permission_mode=SDK_MODE[self.access], can_use_tool=self._can_use_tool,
+            # режим доступа — на каждом вызове инструмента (меняется посреди сессии без перезапуска процесса)
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool])]},
             # тулы местного расширения (extension.py) — рядом с «показать файл»
             # раскладку по соседним сессиям (open_sessions) владелец отключил 16.11.2026: по замеру почти не окупается
             mcp_servers={"lozhka": create_sdk_mcp_server("lozhka", tools=self._host_tools()
@@ -531,9 +591,26 @@ class Session:
             self._set_status("running" if self.client else "idle")
             self._live({"kind": "session", "session": self.public()})
 
+    async def _pre_tool(self, data: dict, tool_use_id, ctx) -> dict:
+        """Хук PreToolUse: решение по режиму доступа раньше allow-правил настроек и режима SDK. full и чтение — без
+        мнения ({}); read — отказ сразу; ask — «спросить»: вызов уходит в can_use_tool, там ждём владельца."""
+        name = str((data or {}).get("tool_name") or "")
+        access = self.access
+        if access == "full" or reads(name):
+            return {}
+        if access == "read":
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": DENY_READ}}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}}
+
     async def _can_use_tool(self, name: str, inp: dict, ctx):
         if name != "AskUserQuestion":
-            return PermissionResultAllow(updated_input=inp)
+            access = self.access
+            if access == "full" or reads(name):
+                return PermissionResultAllow(updated_input=inp)
+            if access == "read":
+                return PermissionResultDeny(message=DENY_READ)
+            return await self._permit(name, inp, ctx)
         rid = ctx.tool_use_id or uuid.uuid4().hex[:12]
         self._event({"kind": "question", "rid": rid, "questions": _trim(inp.get("questions") or [])})
         answers = await self._wait(rid, "question")
@@ -541,6 +618,63 @@ class Session:
             return PermissionResultDeny(message="Владелец остановил ход", interrupt=True)
         self._event({"kind": "answer", "rid": rid, "answers": answers})
         return PermissionResultAllow(updated_input={**inp, "answers": answers})
+
+    async def _permit(self, name: str, inp: dict, ctx):
+        """«Спрашивать»: карточка на сайте (событие permission, пуш), ход ждёт ответа владельца. Запретил с текстом —
+        агент получает текст вместо действия; «Разрешить всё в этой сессии» — режим full."""
+        rid = getattr(ctx, "tool_use_id", None) or uuid.uuid4().hex[:12]
+        self._event({"kind": "permission", "rid": rid, "name": name, "input": _trim(inp, 1500),
+                     "agent_id": getattr(ctx, "agent_id", None)})
+        answer = await self._wait(rid, "permission")
+        if answer is None:
+            return PermissionResultDeny(message="Владелец остановил ход", interrupt=True)  # i18n: model
+        decision, said = answer.get("decision"), answer.get("text") or None
+        self._event({"kind": "permit", "rid": rid, "decision": decision, "text": said})
+        if decision == "all":
+            await self.set_access("full")
+        if decision in ("allow", "all"):
+            return PermissionResultAllow(updated_input=inp)
+        if self.access == "read":                # пока ждали, владелец включил «Только чтение»
+            return PermissionResultDeny(message=DENY_READ)
+        return PermissionResultDeny(message=DENY_SAID.format(said) if said else DENY_ASK)
+
+    async def set_access(self, access: str) -> None:
+        """Режим доступа сессии. Claude Code — сразу (живому процессу set_permission_mode), Codex — со следующего хода.
+        Ждущие разрешения решаются новым режимом: «Полный доступ» — разрешить, «Только чтение» — запретить."""
+        if access not in ACCESS:
+            raise BridgeError("нет такого режима")  # i18n: internal
+        if access == self.access:
+            return
+        self.bridge.update(self.id, access=access)
+        await self._apply_access()
+        if access != "ask":
+            verdict = {"decision": "allow" if access == "full" else "deny"}
+            for rid, (kind, fut) in list(self.pending.items()):
+                if kind == "permission" and not fut.done():
+                    fut.set_result(verdict)
+        self._event({"kind": "note", "access": access, "agent": self.row.get("agent") or "claude"})
+
+    async def _apply_access(self) -> None:
+        client = self.client
+        if not client:
+            return                          # следующий процесс поднимется с новым режимом (_options)
+        try:
+            await client.set_permission_mode(SDK_MODE[self.access])
+        except Exception as e:  # noqa: BLE001
+            # старый CLI не умеет менять режим на ходу — хук и can_use_tool всё равно смотрят на новый режим; режим
+            # SDK (bypass → default) — с перезапуском процесса, когда ход закончится
+            log.info("[%s] set_permission_mode: %s", self.id, e)
+            if self.status == "idle":
+                await self.close()
+
+    def _access_note(self) -> str:
+        """Режим доступа — агенту в конце сообщения, когда поменялся (в ленту не попадает). Новая сессия в полном
+        доступе — ничего; после рестарта моста про режим «Спрашивать» / «Только чтение» напоминаем снова."""
+        access, told = self.access, self.access_told
+        self.access_told = access
+        if access == told or (told is None and access == "full"):
+            return ""
+        return "\n\n" + self.access_notes[access]
 
     def resolve(self, rid: str, kind: str, value) -> None:
         entry = self.pending.get(rid)
@@ -640,7 +774,7 @@ class Session:
                 f"- {f['path']} ({f['name']}, {f['mime']})" for f in files)
             images = [f["path"] for f in files if f["mime"].startswith("image/")]
         text = "\n\n".join(p for p in [lead, text] if p)
-        text = self._with_intro(text) + self._answer_note(answer)
+        text = self._with_intro(text) + self._answer_note(answer) + self._access_note()
         self._live({"kind": "session", "session": self.public()})
         await self._submit(text, images)
 
@@ -755,7 +889,7 @@ class Bridge:
         self.db.execute(f"UPDATE sessions SET {cols} WHERE id = ?", (*fields.values(), sid))
         if sid in self.sessions:
             self.sessions[sid].row.update(fields)
-            if set(fields) & {"title", "model", "effort", "resume_at"}:
+            if set(fields) & {"title", "model", "effort", "resume_at", "access"}:
                 self.publish({"session": sid, "kind": "session", "session": self.sessions[sid].public()})
 
     def add_event(self, sid: str, data: dict) -> dict:
@@ -820,7 +954,7 @@ class Bridge:
         return out
 
     def create(self, project: str, model: str | None, effort: str | None, agent: str | None = None,
-               intro: str | None = None, origin: str | None = None) -> Session:
+               intro: str | None = None, origin: str | None = None, access: str | None = None) -> Session:
         card = projects.resolve(project)
         if not card:
             raise BridgeError("нет такого проекта")
@@ -829,10 +963,12 @@ class Bridge:
             raise BridgeError("нет такого агента")
         model = model if agents.valid_model(agent, model) else agents.DEFAULTS[agent][0]
         effort = effort if effort in EFFORTS else agents.DEFAULTS[agent][1]
+        access = access if access in ACCESS else "full"
         sid, now = uuid.uuid4().hex[:12], time.time()
         self.db.execute("INSERT INTO sessions (id, project, project_name, cwd, model, effort, created, updated, agent, "
-                        "intro, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (sid, card["id"], card["name"], card["path"], model, effort, now, now, agent, intro, origin))
+                        "intro, origin, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (sid, card["id"], card["name"], card["path"], model, effort, now, now, agent, intro, origin,
+                         access))
         session = self.get(sid)
         self.publish({"session": sid, "kind": "session", "session": session.public()})
         return session
@@ -883,7 +1019,8 @@ class Bridge:
             parts.append("Изменённые файлы: " + ", ".join(rel[:60]))
         parts.append("Логи команд не передаются — нужно, посмотри сам (git status, git diff, git log).]\n\n"
                      "Новое сообщение владельца:\n")
-        session = self.create(row["project"], model, effort, agent, intro="\n\n".join(parts), origin=sid)
+        session = self.create(row["project"], model, effort, agent, intro="\n\n".join(parts), origin=sid,
+                              access=old.access)
         session_title = (row["title"] or "Новая сессия") + " — продолжение"
         self.update(session.id, title=session_title[:120])
         self.add_event(session.id, {"kind": "handoff", "from": sid, "from_title": row["title"] or "Новая сессия",

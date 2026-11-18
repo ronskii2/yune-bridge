@@ -8,8 +8,10 @@ Codex сам держит историю треда (~/.codex/sessions), мос�
 usage limit» — событие limit, как у Claude (время обновления Codex пишет по-разному — автопродолжение раз в полчаса).
 
 Codex в режиме exec не спрашивает вопросов и ключей: вопросы — обычным текстом в ответе, ключи владелец кладёт сам.
-Доступ — как у Claude Code в мосте: без песочницы и подтверждений (--dangerously-bypass-approvals-and-sandbox),
-это машина владельца и его сессии.
+Доступ — режим сессии (sessions.ACCESS, столбец access), со следующего хода: full (по умолчанию) — как у Claude Code в
+мосте, без песочницы и подтверждений (--dangerously-bypass-approvals-and-sandbox); ask — песочница workspace-write
+(правки только в папке проекта, без сети): подтверждать по одному exec не умеет, сайт так и подписывает; read —
+песочница read-only. Песочница — через -c sandbox_mode: у `exec resume` нет флага --sandbox.
 
 События `codex exec --json` → лента:
   item.completed agent_message     → text            reasoning          → в ленту не идёт (мысли — внутри агента)
@@ -39,11 +41,25 @@ PREAMBLE = """[Сессия идёт с сайта владельца (разд�
 
 """
 STOP_GRACE = 5
+# Режим доступа → флаги хода. approval_policy never: в exec подтверждать некому — что песочница не пускает, просто не выходит
+ACCESS_ARGS = {
+    "full": ["--dangerously-bypass-approvals-and-sandbox"],
+    "ask": ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
+            "-c", "sandbox_workspace_write.network_access=false"],
+    "read": ["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"'],
+}
+ACCESS_NOTE = {  # i18n: model
+    "full": "[Режим доступа сессии: полный — без песочницы.]",
+    "ask": "[Режим доступа сессии: песочница — правки только в папке проекта, сеть закрыта.]",
+    "read": "[Режим доступа сессии: только чтение — песочница не даст менять файлы; читай, ищи, объясняй и предлагай "
+            "правки текстом.]",
+}
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
 class CodexSession(Session):
     steer = False
+    access_notes = ACCESS_NOTE
 
     def __init__(self, bridge, row: dict):
         super().__init__(bridge, row)
@@ -95,7 +111,7 @@ class CodexSession(Session):
             argv.append("resume")
         for path in images:
             argv += ["-i", path]
-        argv += ["--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+        argv += ["--json", *ACCESS_ARGS[self.access], "--skip-git-repo-check"]
         if r["model"] and r["model"] != "default":
             argv += ["-m", r["model"]]
         argv += ["-c", f'model_reasoning_effort="{r["effort"]}"']
@@ -284,6 +300,9 @@ class CodexSession(Session):
     async def close(self) -> None:
         await self._kill()
         self._set_status("idle")
+
+    async def _apply_access(self) -> None:
+        """Песочница — параметр запуска: новый режим — со следующего хода (идущий доделывает в прежнем)."""
 
     async def configure(self, model: str | None, effort: str | None) -> None:
         """Модель и уровень — параметры запуска: действуют со следующего хода."""

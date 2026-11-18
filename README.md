@@ -35,9 +35,16 @@ Not sent:
   only relayed to your browser while you log in);
 - anything from folders outside the configured project roots, unless an agent in a session reads it.
 
-Sessions run with the agent's own permissions on your machine (Claude Code in `bypassPermissions`, Codex without a
-sandbox), exactly as if you ran them in a terminal. Only connect machines and projects you are comfortable an agent
-working in.
+Each session has an access mode, switchable at any time from the icon under the message field:
+
+- **Full access** (default) — Claude Code in `bypassPermissions`, Codex without a sandbox, exactly as if you ran them
+  in a terminal yourself.
+- **Ask** — Claude Code asks you in Yune (Allow / Deny) before editing files or running commands; reading and searching
+  need no approval. Codex runs in the `workspace-write` sandbox (edits only inside the project, no network), since
+  `codex exec` cannot ask per action.
+- **Read only** — Claude Code may only read and search; Codex runs in the `read-only` sandbox.
+
+Only connect machines and projects you are comfortable an agent working in.
 
 ## Install
 

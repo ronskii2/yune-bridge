@@ -12,6 +12,7 @@
   NAMES: dict[str, str]         имена проектов по пути
   HOME_NAME: str                подпись карточки «без проекта» при папках ROOTS
   tools(session) -> list        тулы Claude (SDK MCP, в сервере рядом с send_file)
+  READ_TOOLS: tuple[str, ...]   их имена (mcp__lozhka__…), которым не нужно разрешение в режиме «Спрашивать»
   prompt() -> str               дополнение системной подсказки Claude (о том, что дают эти тулы)
   meta() -> dict                поля к ответу /meta
 """

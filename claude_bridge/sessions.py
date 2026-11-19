@@ -45,7 +45,9 @@ Codex — со следующего хода (codex_session: песочница 
 снова упёрлись в лимит — ждём следующего окна сами.
 
 Процесс гаснет после IDLE_CLOSE_SEC тишины; следующее сообщение поднимает его снова с resume (история Claude —
-в ~/.claude/projects). Рестарт моста живые ходы обрывает — сессии остаются, продолжаются тем же resume.
+в ~/.claude/projects). Пока у процесса Claude есть фоновые команды (Bash run_in_background: сборка, brew upgrade) — не
+гасим: они его дети и умерли бы вместе с ним (19.11.2026: долгий brew upgrade убит молча через 10 минут после хода);
+дольше BG_MAX_SEC — гасим и пишем в ленту, что фоновые команды остановлены. Рестарт моста живые ходы обрывает — сессии остаются, продолжаются тем же resume.
 
 Агент сессии — столбец agent: claude (здесь) или codex (codex_session.CodexSession — та же лента событий). «Продолжить
 в другом агенте» (handoff) — новая сессия в том же проекте с выжимкой прежней: сообщения владельца, итоговые ответы,
@@ -86,6 +88,7 @@ DATA = os.environ.get("CLAUDE_BRIDGE_DATA") or os.path.expanduser("~/.yune-bridg
 CLI = agents.CLAUDE_CLI
 # Процесс claude — ~300 МБ; кеш промпта у API живёт 5 минут, держать процесс дольше — только память (15.11.2026)
 IDLE_CLOSE_SEC = 10 * 60
+BG_MAX_SEC = 6 * 3600
 DELTA_EVERY_SEC = 0.12
 DELTA_FULL_SEC = 3
 TRIM = 4000
@@ -1107,6 +1110,27 @@ class Bridge:
                     queue.get_nowait()
                 queue.put_nowait({"kind": "resync"})
 
+    @staticmethod
+    async def _bg_commands(client) -> int:
+        """Сколько фоновых команд у процесса Claude: инструмент Bash запускает каждую обёрткой
+        «source ~/.claude/shell-snapshots/… && eval …» — прямой ребёнок CLI с этой строкой и есть команда (серверы MCP —
+        без неё). Windows и неизвестный процесс — 0: там гасим, как раньше."""
+        pid = getattr(getattr(getattr(client, "_transport", None), "_process", None), "pid", None)
+        if not pid or os.name == "nt":
+            return 0
+        try:
+            proc = await asyncio.create_subprocess_exec("ps", "-A", "-o", "ppid=,args=", stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), 10)
+        except (OSError, asyncio.TimeoutError):
+            return 0
+        n = 0
+        for line in out.decode("utf-8", "replace").splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[0] == str(pid) and "shell-snapshots" in parts[1]:
+                n += 1
+        return n
+
     async def sweep(self) -> None:
         """Гасит процессы, которые молчат IDLE_CLOSE_SEC и ничего не ждут; продолжает сессии, ждавшие лимита."""
         while True:
@@ -1125,7 +1149,16 @@ class Bridge:
             for session in list(self.sessions.values()):
                 if (session.client and session.status == "idle" and not session.pending
                         and now - session.last_active > IDLE_CLOSE_SEC):
+                    bg = await self._bg_commands(session.client)
+                    if bg and now - session.last_active < BG_MAX_SEC:
+                        if not getattr(session, "bg_logged", False):
+                            log.info("[%s] idle, но фоновых команд %d — не гасим", session.id, bg)
+                            session.bg_logged = True
+                        continue
                     log.info("[%s] idle — closing", session.id)
+                    session.bg_logged = False
+                    if bg:
+                        session._event({"kind": "note", "text": "Фоновые команды остановлены: сессия молчала 6 часов"})
                     await session.close()
 
     async def shutdown(self) -> None:

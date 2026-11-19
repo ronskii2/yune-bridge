@@ -42,7 +42,7 @@ APP = os.path.dirname(PKG)
 NAME = "claude_bridge"
 # модули моста — всё, что входит в сборку; новый модуль — сюда (иначе его не будет ни в архиве, ни в репозитории)
 PACKAGE = ("__init__.py", "agents.py", "awake.py", "codex_session.py", "extension.py", "limits.py", "projects.py",
-           "remote.py", "server.py", "sessions.py", "update.py")
+           "remote.py", "security.py", "server.py", "sessions.py", "update.py")
 REQUIREMENTS = "requirements.txt"
 REPO = "ronskii2/yune-bridge"
 RELEASE_URL = "https://github.com/" + REPO + "/releases/download/{build}/yune-bridge.zip"

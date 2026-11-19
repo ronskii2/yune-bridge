@@ -10,6 +10,7 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /agents/{agent}/login         вход в агента: ссылка, код, состояние
   POST /agents/{agent}/login         {action: start | code | cancel, code?}
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py)
+  GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /projects                     проекты для новой сессии
   GET  /sessions                     список сессий
   POST /sessions                     {project, agent?, model?, effort?, access?} → сессия
@@ -40,7 +41,7 @@ import signal
 
 from aiohttp import web
 
-from . import agents, extension, limits, projects
+from . import agents, extension, limits, projects, security
 from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT, DEFAULT_MODEL, device_note
 
 log = logging.getLogger("claude_bridge")
@@ -96,6 +97,9 @@ def make_app(bridge: Bridge) -> web.Application:
         if agent not in ("claude", "codex"):
             return _json({"ok": False, "error": "unknown agent"}, 400)
         return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1")})
+
+    async def security_get(request):
+        return _json({"ok": True, **await security.get(fresh=request.query.get("fresh") == "1")})
 
     async def agent_login(request):
         try:
@@ -261,6 +265,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/meta", meta)
     r.add_get("/agents", agent_list)
     r.add_get("/limits", limit_get)
+    r.add_get("/security", security_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)
     r.add_get("/projects", project_list)
     r.add_get("/sessions", session_list)

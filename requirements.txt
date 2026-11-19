@@ -2,3 +2,5 @@
 --no-binary claude-agent-sdk
 aiohttp>=3.9
 claude-agent-sdk
+# CA bundle when Python has none (python.org build on macOS without "Install Certificates") — see __init__.py
+certifi

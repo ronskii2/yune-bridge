@@ -78,8 +78,14 @@ if ($Source -eq "github") {          # дальше мост обновляет�
   Set-Content -Path (Join-Path $Data "update-source") -Value "github" -Encoding ASCII
 }
 if (-not (Test-Path .venv)) { & $PyCmd @PyArgs -m venv .venv }
-& .venv\Scripts\python -m pip install -q --upgrade pip | Out-Null
-& .venv\Scripts\python -m pip install -q -r requirements.txt
+# Пакеты — с PyPI без настроек pip человека: чужой индекс в pip.ini (pypi.ngc.nvidia.com и т. п.), который не открывается,
+# вешал установку на повторах. Не вышло — ещё раз по его настройкам (своё зеркало, прокси)
+function Install-Pip {
+  & .venv\Scripts\python -m pip install -q --isolated --index-url https://pypi.org/simple --retries 2 --timeout 20 @args
+  if ($LASTEXITCODE -ne 0) { & .venv\Scripts\python -m pip install -q @args }
+}
+Install-Pip --upgrade pip | Out-Null
+Install-Pip -r requirements.txt
 
 if (-not (Test-Path (Join-Path $HOME ".yune-bridge\config.json"))) {
   & .venv\Scripts\python -m claude_bridge.remote pair $Site --no-wait   # ввода кода ждёт мост: команда не висит

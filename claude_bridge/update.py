@@ -211,8 +211,20 @@ async def install(files: list[tuple[str, bytes]]) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# Пакеты — с PyPI без настроек pip человека (чужой индекс в pip.conf, который не открывается, вешал установку на
+# повторах); не вышло — ещё раз по его настройкам (своё зеркало, прокси). Как в install.sh / install.ps1
+PYPI = ["--isolated", "--index-url", "https://pypi.org/simple", "--retries", "2", "--timeout", "20"]
+
+
 async def _pip(requirements: str) -> None:
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "pip", "install", "-q", "-r", requirements,
+    try:
+        await _pip_run(PYPI, requirements)
+    except RuntimeError:
+        await _pip_run([], requirements)
+
+
+async def _pip_run(opts: list[str], requirements: str) -> None:
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "pip", "install", "-q", *opts, "-r", requirements,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), PIP_TIMEOUT_SEC)

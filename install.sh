@@ -89,8 +89,11 @@ if [ "$SOURCE" = "github" ]; then          # дальше мост обновл�
   mkdir -p "$HOME/.yune-bridge" && echo github > "$HOME/.yune-bridge/update-source"
 fi
 [ -d .venv ] || "$PY" -m venv .venv
-.venv/bin/pip install -q --upgrade pip >/dev/null
-.venv/bin/pip install -q -r requirements.txt
+# Пакеты — с PyPI без настроек pip человека: чужой индекс в pip.conf (pypi.ngc.nvidia.com и т. п.), который не открывается,
+# вешал установку на повторах. Не вышло — ещё раз по его настройкам (своё зеркало, прокси)
+pipi() { .venv/bin/pip install -q --isolated --index-url https://pypi.org/simple --retries 2 --timeout 20 "$@" || .venv/bin/pip install -q "$@"; }
+pipi --upgrade pip >/dev/null
+pipi -r requirements.txt
 
 if [ ! -f "$HOME/.yune-bridge/config.json" ]; then
   .venv/bin/python -m claude_bridge.remote pair "$SITE" --no-wait   # ввода кода ждёт мост: команда не висит

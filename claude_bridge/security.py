@@ -8,7 +8,8 @@ NGINX_VERSION).
   GET /security?fresh=1  →  {ok, at, os, updates, reboot, images, listeners, runtimes, errors}
 
 - updates — ожидающие обновления: apt (источник: обновления безопасности Ubuntu/Debian или сторонний репозиторий —
-  их unattended-upgrades сам не ставит), dnf, softwareupdate (macOS), Homebrew (только «устарело», без CVE);
+  их unattended-upgrades сам не ставит), dnf, softwareupdate (macOS), Homebrew (только «устарело», без CVE), Windows
+  Update (категория «безопасность» / «критические») и winget;
 - reboot — /var/run/reboot-required: с какого времени и что обновилось;
 - images — запущенные контейнеры Docker, по одному на образ: ОС образа и пакеты в экосистемах OSV (Debian:13,
   Ubuntu:24.04:LTS, Alpine:v3.21, PyPI, npm). Читаем через `docker exec` (cat и find в контейнере): папка Docker
@@ -94,7 +95,7 @@ def _os_info() -> dict:
     elif info["system"] == "Darwin":
         info.update(id="macos", version=platform.mac_ver()[0], name="macOS " + platform.mac_ver()[0])
     elif info["system"] == "Windows":
-        info.update(id="windows", version=platform.version(), name="Windows " + platform.release())
+        info.update(id="windows", version=platform.version(), name="Windows " + platform.release())   # version: 10.0.<сборка>
     return info
 
 
@@ -141,10 +142,57 @@ async def _updates() -> list[dict]:
                               "to": f.get("current_version", ""), "origin": "Homebrew", "security": False,
                               "third_party": True})
         return items
+    if system == "Windows":
+        return await _windows_updates()
     return []
 
 
+# PowerShell: обновления Windows Update, которые не стоят (поиск — до пары минут), и сокеты на прослушивании — JSON
+PS_WU = ("$s=(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher();"
+         "$r=$s.Search(\"IsInstalled=0 and IsHidden=0 and Type='Software'\");"
+         "@($r.Updates | ForEach-Object { [pscustomobject]@{t=$_.Title; c=(($_.Categories | ForEach-Object { $_.Name }) -join ',')} })"
+         " | ConvertTo-Json -Compress")
+PS_LISTEN = ("@(Get-NetTCPConnection -State Listen | ForEach-Object { [pscustomobject]@{a=$_.LocalAddress; p=$_.LocalPort;"
+             " n=(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName} }) | ConvertTo-Json -Compress")
+PS_REBOOT = ("Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired'")
+
+
+async def _ps(script: str, timeout: int = CMD_SEC) -> str:
+    code, out = await _run("powershell", "-NoProfile", "-NonInteractive", "-Command", script, timeout=timeout)
+    return out if code == 0 else ""
+
+
+def _json_list(text: str) -> list:
+    try:
+        data = json.loads(text) if text.strip() else []
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else [data]
+
+
+async def _windows_updates() -> list[dict]:
+    items = []
+    for u in _json_list(await _ps(PS_WU, timeout=300)):
+        cats = str(u.get("c") or "")
+        items.append({"name": str(u.get("t") or "")[:200], "from": "", "to": "", "origin": "Windows Update",
+                      "security": "Security" in cats or "Critical" in cats, "third_party": False})
+    # winget: таблица «Имя  Id  Версия  Доступно  Источник»; длинный Id вылезает за столбец — разбираем с конца строки:
+    # источник, доступная версия, текущая, Id, остальное — имя
+    code, out = await _run("winget", "upgrade", "--include-unknown", "--disable-interactivity",
+                           "--accept-source-agreements", timeout=180)
+    lines = out.splitlines()
+    head = next((i for i, l in enumerate(lines) if set(l.strip()) == {"-"} and len(l.strip()) > 10), None)
+    for line in lines[head + 1:] if head is not None else []:
+        parts = line.split()
+        if len(parts) >= 5 and parts[-1] in ("winget", "msstore"):
+            items.append({"name": parts[-4].lower(), "from": parts[-3], "to": parts[-2], "origin": "winget",
+                          "security": False, "third_party": True})
+    return items
+
+
 async def _reboot() -> dict:
+    if platform.system() == "Windows":
+        return {"required": (await _ps(PS_REBOOT, timeout=30)).strip().lower() == "true"}
     flag = "/var/run/reboot-required"
     if not os.path.exists(flag):
         return {"required": False}
@@ -291,6 +339,14 @@ async def _listeners() -> list[dict]:
                     seen.add(key)
                     found.append({"proto": parts[0], "port": int(port) if port.isdigit() else port,
                                   "process": key[2], "addr": host})
+    elif platform.system() == "Windows":
+        for x in _json_list(await _ps(PS_LISTEN, timeout=60)):
+            host, port = str(x.get("a") or ""), x.get("p")
+            if _public(host):
+                key = ("tcp", str(port), str(x.get("n") or ""))
+                if key not in seen:
+                    seen.add(key)
+                    found.append({"proto": "tcp", "port": port, "process": key[2], "addr": host})
     elif shutil.which("lsof"):
         code, out = await _run("lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-iUDP")
         for line in out.splitlines()[1:]:

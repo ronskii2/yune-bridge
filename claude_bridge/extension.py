@@ -15,6 +15,7 @@
   READ_TOOLS: tuple[str, ...]   их имена (mcp__lozhka__…), которым не нужно разрешение в режиме «Спрашивать»
   prompt() -> str               дополнение системной подсказки Claude (о том, что дают эти тулы)
   meta() -> dict                поля к ответу /meta
+  AI_HTTP: tuple[tuple, ...]    свои шлюзы моделей для скана «Агентов» (registry.py): (имя, шаблон, подстрока)
 """
 from __future__ import annotations
 

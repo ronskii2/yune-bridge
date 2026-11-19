@@ -11,6 +11,7 @@ WebSocket моста; на машине, где работает сам сайт
   POST /agents/{agent}/login         {action: start | code | cancel, code?}
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py)
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
+  GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
   GET  /sessions                     список сессий
   POST /sessions                     {project, agent?, model?, effort?, access?} → сессия
@@ -41,7 +42,7 @@ import signal
 
 from aiohttp import web
 
-from . import agents, extension, limits, projects, security
+from . import agents, extension, limits, projects, registry, security
 from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT, DEFAULT_MODEL, device_note
 
 log = logging.getLogger("claude_bridge")
@@ -100,6 +101,9 @@ def make_app(bridge: Bridge) -> web.Application:
 
     async def security_get(request):
         return _json({"ok": True, **await security.get(fresh=request.query.get("fresh") == "1")})
+
+    async def registry_get(request):
+        return _json({"ok": True, **await registry.get(fresh=request.query.get("fresh") == "1")})
 
     async def agent_login(request):
         try:
@@ -266,6 +270,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/agents", agent_list)
     r.add_get("/limits", limit_get)
     r.add_get("/security", security_get)
+    r.add_get("/registry", registry_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)
     r.add_get("/projects", project_list)
     r.add_get("/sessions", session_list)

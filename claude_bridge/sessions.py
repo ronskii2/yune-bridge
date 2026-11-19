@@ -95,6 +95,10 @@ CLI = agents.CLAUDE_CLI
 # Процесс claude — ~300 МБ; кеш промпта у API живёт 5 минут, держать процесс дольше — только память (15.11.2026)
 IDLE_CLOSE_SEC = 10 * 60
 BG_MAX_SEC = 6 * 3600
+# Автосжатие (переключатель «auto_compact», сайт — в окне лимитов): за столько до конца часового кэша подписки простаивающая
+# сессия с контекстом от AUTO_COMPACT_MIN_TOKENS сама делает /compact (порог — как у строки «Сжать» на сайте)
+AUTO_COMPACT_LEAD_SEC = 5 * 60
+AUTO_COMPACT_MIN_TOKENS = 50000
 DELTA_EVERY_SEC = 0.12
 DELTA_FULL_SEC = 3
 TRIM = 4000
@@ -214,6 +218,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     qid TEXT PRIMARY KEY, session TEXT NOT NULL, ts REAL NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outbox_session_idx ON outbox (session, ts);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 # Столбцы, добавленные позже (SQLite: ADD COLUMN без IF NOT EXISTS — проверяем сами)
 COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin": "TEXT", "resume_at": "REAL",
@@ -953,6 +958,7 @@ class Bridge:
         self.subscribers: set[asyncio.Queue] = set()
         self.limits: dict[str, dict] = {}           # лимиты подписки Claude по окнам: последнее от Claude Code
         self.limit_seen: set[tuple] = set()         # предупреждения, уже показанные в ленте
+        self.auto_compacted: dict[str, float] = {}  # сессия → cache_at, по которому автосжатие уже было (не повторять)
 
     # ── база ────────────────────────────────────────────────────────────────
 
@@ -988,6 +994,19 @@ class Bridge:
         event = {"id": cur.lastrowid, "ts": ts, **data}
         self.publish({"session": sid, **event})
         return event
+
+    # ── настройки моста (общие на все сессии) ────────────────────────────────
+
+    def setting(self, key: str, default: str | None = None) -> str | None:
+        row = self.db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    @property
+    def auto_compact(self) -> bool:
+        return self.setting("auto_compact") == "1"
 
     # ── отложенные сообщения ────────────────────────────────────────────────
 
@@ -1229,6 +1248,10 @@ class Bridge:
                 except Exception:  # noqa: BLE001
                     log.exception("[%s] resume", row["id"])
                     self.update(row["id"], resume_at=None)
+            try:
+                await self._auto_compact()
+            except Exception:  # noqa: BLE001
+                log.exception("auto compact")
             now = time.monotonic()
             for session in list(self.sessions.values()):
                 if (session.client and session.status == "idle" and not session.pending
@@ -1244,6 +1267,29 @@ class Bridge:
                     if bg:
                         session._event({"kind": "note", "code": "bg_stopped"})     # текст — на языке сайта (server.js noteText)
                     await session.close()
+
+    async def _auto_compact(self) -> None:
+        """Автосжатие: кэш контекста подписки (час) кончается через AUTO_COMPACT_LEAD_SEC — /compact, пока сжатие ещё
+        читает контекст из кэша; следующее сообщение пойдёт с коротким контекстом, а не запишет весь заново. Кэш на
+        5 минут (ключ API, докупка сверх лимита) не трогаем — сжимали бы сразу после каждого хода. По одному сроку кэша —
+        одна попытка: не вышло (лимит, ошибка) — до следующего хода не повторяем."""
+        if not self.auto_compact:
+            return
+        now = time.time()
+        rows = self.db.execute(
+            "SELECT id, cache_at FROM sessions WHERE archived = 0 AND agent = 'claude' AND cache_ttl >= 3600 "
+            "AND ctx_tokens >= ? AND cache_at + cache_ttl - ? BETWEEN 0 AND ?",
+            (AUTO_COMPACT_MIN_TOKENS, now, AUTO_COMPACT_LEAD_SEC)).fetchall()
+        for row in rows:
+            if self.auto_compacted.get(row["id"]) == row["cache_at"]:
+                continue
+            self.auto_compacted[row["id"]] = row["cache_at"]
+            session = self.get(row["id"])
+            if session.status != "idle" or session.pending or session.outbox or self.limit_rejected():
+                continue
+            log.info("[%s] cache expires soon — auto compact", session.id)
+            session._event({"kind": "note", "code": "auto_compact"})      # текст — на языке сайта (server.js noteText)
+            await session.compact()
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):

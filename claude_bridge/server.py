@@ -9,7 +9,9 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /agents?fresh=1               агенты: установлен, вошёл, модели (agents.py)
   GET  /agents/{agent}/login         вход в агента: ссылка, код, состояние
   POST /agents/{agent}/login         {action: start | code | cancel, code?}
-  GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py)
+  GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py);
+                                     у Claude — и переключатель автосжатия (auto_compact)
+  POST /settings                     {auto_compact: bool} — настройки моста, общие на все сессии
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
@@ -100,7 +102,14 @@ def make_app(bridge: Bridge) -> web.Application:
         agent = request.query.get("agent") or "claude"
         if agent not in ("claude", "codex"):
             return _json({"ok": False, "error": "unknown agent"}, 400)
-        return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1")})
+        extra = {"auto_compact": bridge.auto_compact} if agent == "claude" else {}
+        return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1"), **extra})
+
+    async def settings_set(request):
+        body = await _body(request)
+        if "auto_compact" in body:
+            bridge.set_setting("auto_compact", "1" if body["auto_compact"] else "0")
+        return _json({"ok": True, "auto_compact": bridge.auto_compact})
 
     async def security_get(request):
         return _json({"ok": True, **await security.get(fresh=request.query.get("fresh") == "1")})
@@ -289,6 +298,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/meta", meta)
     r.add_get("/agents", agent_list)
     r.add_get("/limits", limit_get)
+    r.add_post("/settings", settings_set)
     r.add_get("/security", security_get)
     r.add_get("/registry", registry_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)

@@ -1152,13 +1152,13 @@ class Bridge:
                     bg = await self._bg_commands(session.client)
                     if bg and now - session.last_active < BG_MAX_SEC:
                         if not getattr(session, "bg_logged", False):
-                            log.info("[%s] idle, но фоновых команд %d — не гасим", session.id, bg)
+                            log.info("[%s] idle with %d background commands — keeping it up", session.id, bg)
                             session.bg_logged = True
                         continue
                     log.info("[%s] idle — closing", session.id)
                     session.bg_logged = False
                     if bg:
-                        session._event({"kind": "note", "text": "Фоновые команды остановлены: сессия молчала 6 часов"})
+                        session._event({"kind": "note", "code": "bg_stopped"})     # текст — на языке сайта (server.js noteText)
                     await session.close()
 
     async def shutdown(self) -> None:

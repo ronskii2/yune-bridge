@@ -198,10 +198,17 @@ def connector(cfg: dict):
 
 
 class Tunnel:
+    def _keep_folders(self, folders: list[str]) -> None:
+        """Папка, выбранная на сайте, — в config.json: после перезапуска она снова в проектах."""
+        self.cfg["folders"] = folders
+        cfg = load()
+        cfg["folders"] = folders
+        save(cfg)
+
     def __init__(self, cfg: dict):
         from . import extension, projects
         extension.load(cfg.get("host_dir"))
-        projects.configure(cfg.get("roots") or DEFAULT_ROOTS, cfg.get("folders") or [])
+        projects.configure(cfg.get("roots") or DEFAULT_ROOTS, cfg.get("folders") or [], save=self._keep_folders)
         from . import server, sessions
         from .sessions import Bridge
         # MCP Yune в сессиях этой машины — ключом машины (сайт сверяет его так же, как у WebSocket)

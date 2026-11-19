@@ -13,6 +13,8 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
+  GET  /dirs?path=                   подпапки (окно «Другая папка»)
+  POST /folders                      {path} — папку в проекты
   GET  /sessions                     список сессий
   POST /sessions                     {project, agent?, model?, effort?, access?, rules?} → сессия; rules — права
                                      агента Yune (rules.py), мост проверяет каждое действие
@@ -128,6 +130,20 @@ def make_app(bridge: Bridge) -> web.Application:
 
     async def project_list(request):
         return _json({"ok": True, "projects": await asyncio.to_thread(projects.listing)})
+
+    async def dir_list(request):
+        try:
+            return _json({"ok": True, **await asyncio.to_thread(projects.browse, request.query.get("path"))})
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+
+    async def folder_add(request):
+        body = await _body(request)
+        try:
+            card = await asyncio.to_thread(projects.add_folder, str(body.get("path") or ""))
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return _json({"ok": True, "project": card})
 
     async def session_list(request):
         return _json({"ok": True, "sessions": bridge.listing()})
@@ -277,6 +293,8 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/registry", registry_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)
     r.add_get("/projects", project_list)
+    r.add_get("/dirs", dir_list)
+    r.add_post("/folders", folder_add)
     r.add_get("/sessions", session_list)
     r.add_post("/sessions", session_create)
     r.add_get("/sessions/{id:[0-9a-f]{12}}", session_get)

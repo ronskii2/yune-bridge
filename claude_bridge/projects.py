@@ -1,6 +1,7 @@
 """Проекты машины для новой сессии: git-репозитории в папках поиска (+ «вся машина» — домашняя папка).
 
-Папки поиска и отдельные папки без git — из настроек моста (~/.yune-bridge/config.json: roots, folders), окружения
+Папки поиска и отдельные папки — из настроек моста (~/.yune-bridge/config.json: roots, folders; папку, выбранную
+на сайте «Другой папкой» — browse, add_folder, — мост дописывает в folders сам), окружения
 CLAUDE_BRIDGE_ROOTS / CLAUDE_BRIDGE_FOLDERS (через os.pathsep) или местного расширения (extension.py: ROOTS, EXTRA,
 NAMES); ничего нет — домашняя папка. Папка без git — тоже проект (ветки и правок у неё нет).
 
@@ -22,13 +23,16 @@ SKIP = {"proc", "sys", "dev", "run", "tmp", "var", "usr", "lib", "lib64", "bin",
 
 _roots: tuple[str, ...] | None = None
 _folders: tuple[str, ...] = ()
+_save = None          # сохранить отдельные папки (ПК: в config.json моста); нет — выбранная папка живёт до перезапуска
+BROWSE_MAX = 500      # подпапок в одном окне выбора
 
 
-def configure(roots: list[str] | None = None, folders: list[str] | None = None) -> None:
+def configure(roots: list[str] | None = None, folders: list[str] | None = None, save=None) -> None:
     """Папки поиска и отдельные папки (ПК: из config.json моста). Без вызова — окружение, расширение или ~."""
-    global _roots, _folders
+    global _roots, _folders, _save
     _roots = tuple(os.path.expanduser(r) for r in roots) if roots else None
     _folders = tuple(os.path.expanduser(f) for f in folders or [])
+    _save = save
 
 
 def _search_roots() -> tuple[str, ...]:
@@ -125,6 +129,48 @@ def listing() -> list[dict]:
     cards = [_card(p) for p in candidates()]
     cards.sort(key=lambda c: c["when"] or 0, reverse=True)
     return cards + [home_card()]
+
+
+def browse(path: str | None = None) -> dict:
+    """Окно «Другая папка»: подпапки path (по умолчанию — домашняя), без скрытых; git — у репозитория.
+    Нет такой папки — ValueError("not_found"), нет доступа (macOS: «Рабочий стол», «Документы» без разрешения) —
+    ValueError("no_access")."""
+    path = os.path.realpath(os.path.expanduser(path or HOME))
+    if not os.path.isdir(path):
+        raise ValueError("not_found")
+    try:
+        entries = sorted(os.scandir(path), key=lambda e: e.name.lower())
+    except PermissionError:
+        raise ValueError("no_access") from None
+    except OSError:
+        raise ValueError("not_found") from None
+    dirs = []
+    for e in entries:
+        try:
+            if e.name.startswith(".") or not e.is_dir():
+                continue
+        except OSError:
+            continue
+        dirs.append({"name": e.name, "path": e.path, "git": _is_git(e.path)})
+        if len(dirs) >= BROWSE_MAX:
+            break
+    parent = os.path.dirname(path)
+    return {"path": path, "parent": parent if parent != path else None, "home": HOME, "dirs": dirs}
+
+
+def add_folder(path: str) -> dict:
+    """Выбранная папка — в проекты (отдельные папки, folders): карточка проекта. Домашняя — «вся машина»."""
+    global _folders
+    real = os.path.realpath(os.path.expanduser(path or ""))
+    if not path or not os.path.isdir(real):
+        raise ValueError("not_found")
+    if real == os.path.realpath(HOME):
+        return home_card()
+    if real not in candidates():
+        _folders = _folders + (real,)
+        if _save:
+            _save(list(_folders))
+    return _card(real)
 
 
 def resolve(project: str) -> dict | None:

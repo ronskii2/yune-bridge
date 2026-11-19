@@ -13,16 +13,42 @@ SOURCE="${YUNE_BRIDGE_SOURCE:-__BRIDGE_SOURCE__}"
 case "$SOURCE" in __*__) SOURCE="github" ;; esac
 BUILD="__BRIDGE_BUILD__"
 case "$BUILD" in __*__) BUILD="" ;; esac
+UI="${YUNE_LANG:-__YUNE_LANG__}"        # язык сообщений: подставляет сайт (язык витрины); из репозитория — локаль машины
+case "$UI" in __*__|"") case "${LC_ALL:-${LANG:-}}" in ja*) UI=ja ;; ru*) UI=ru ;; *) UI=en ;; esac ;; esac
+case "$UI" in ja|en|ru) ;; *) UI=en ;; esac
+export YUNE_LANG="$UI"                  # и мосту: код привязки — на том же языке
+msg() {
+  case "$UI:$1" in
+    ja:python) echo "Python 3.11 以上が必要です。Mac: brew install python、Linux: python3.11 以上のパッケージをインストールしてください" ;;
+    en:python) echo "Python 3.11 or newer is required. Mac: brew install python, Linux: a python3.11+ package" ;;
+    ru:python) echo "Нужен Python 3.11 или новее. Mac: brew install python, Linux: пакет python3.11+" ;;
+    ja:noagent) echo "注意: Claude Code も Codex も見つかりません。どちらかをインストールすれば、ブリッジが自動で認識します。" ;;
+    en:noagent) echo "Note: neither Claude Code nor Codex was found — install at least one, the bridge will pick it up." ;;
+    ru:noagent) echo "Внимание: ни Claude Code, ни Codex не найдены — поставьте хотя бы один, мост увидит его сам." ;;
+    ja:download) echo "ブリッジをダウンロード中: $2" ;;
+    en:download) echo "Downloading the bridge: $2" ;;
+    ru:download) echo "Скачиваю мост: $2" ;;
+    ja:done_mac) echo "完了: ブリッジを起動しました。ログイン時に自動で起動します。ログ: ~/.yune-bridge/bridge.log" ;;
+    en:done_mac) echo "Done: the bridge is running and starts at login. Log: ~/.yune-bridge/bridge.log" ;;
+    ru:done_mac) echo "Готово: мост запущен и стартует сам при входе. Журнал: ~/.yune-bridge/bridge.log" ;;
+    ja:done_linux) echo "完了: ブリッジを起動しました（systemctl --user status yune-bridge）。" ;;
+    en:done_linux) echo "Done: the bridge is running (systemctl --user status yune-bridge)." ;;
+    ru:done_linux) echo "Готово: мост запущен (systemctl --user status yune-bridge)." ;;
+    ja:done_other) echo "完了。ブリッジを起動してください: $2" ;;
+    en:done_other) echo "Done. Start the bridge: $2" ;;
+    ru:done_other) echo "Готово. Запустите мост: $2" ;;
+  esac
+}
 REPO="https://github.com/ronskii2/yune-bridge"
 APP="$HOME/.yune-bridge-app"
 PY="${PYTHON:-python3}"
 
 if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-  echo "Нужен Python 3.11 или новее. Mac: brew install python, Linux: пакет python3.11+" >&2
+  msg python >&2
   exit 1
 fi
 command -v claude >/dev/null 2>&1 || command -v codex >/dev/null 2>&1 || \
-  echo "Внимание: ни Claude Code, ни Codex не найдены — поставьте хотя бы один, мост увидит его сам."
+  msg noagent
 
 if [ "$SOURCE" = "github" ]; then
   if [ -n "$BUILD" ]; then ZIP="$REPO/releases/download/$BUILD/yune-bridge.zip"
@@ -35,7 +61,7 @@ mkdir -p "$APP"
 cd "$APP"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-echo "Скачиваю мост: $ZIP"
+msg download "$ZIP"
 curl -fsSL "$ZIP" -o "$TMP/bridge.zip"
 # хеш содержимого считает сам установщик (тот же алгоритм, что update.build_of) — не код из архива; не сошлось — стоп
 "$PY" - "$TMP/bridge.zip" "$TMP/x" "$BUILD" <<'PY'
@@ -82,7 +108,7 @@ case "$(uname -s)" in
   <key>Label</key><string>jp.yune.bridge</string>
   <key>ProgramArguments</key><array><string>$APP/.venv/bin/python</string><string>-m</string><string>claude_bridge.remote</string><string>run</string></array>
   <key>WorkingDirectory</key><string>$APP</string>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string><key>YUNE_LANG</key><string>$UI</string></dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$HOME/.yune-bridge/bridge.log</string>
   <key>StandardErrorPath</key><string>$HOME/.yune-bridge/bridge.log</string>
@@ -90,7 +116,7 @@ case "$(uname -s)" in
 PLIST
     launchctl unload "$PLIST" 2>/dev/null || true
     launchctl load "$PLIST"
-    echo "Готово: мост запущен и стартует сам при входе. Журнал: ~/.yune-bridge/bridge.log"
+    msg done_mac
     ;;
   Linux)
     UNIT="$HOME/.config/systemd/user/yune-bridge.service"
@@ -104,6 +130,7 @@ After=network-online.target
 WorkingDirectory=$APP
 ExecStart=$RUN
 Environment=PATH=$PATH
+Environment=YUNE_LANG=$UI
 Restart=always
 RestartSec=10
 
@@ -113,9 +140,9 @@ UNIT
     systemctl --user daemon-reload
     systemctl --user enable yune-bridge
     systemctl --user restart yune-bridge   # уже работал (повторная установка) — с новым мостом и новым кодом
-    echo "Готово: мост запущен (systemctl --user status yune-bridge)."
+    msg done_linux
     ;;
   *)
-    echo "Готово. Запустите мост: $RUN"
+    msg done_other "$RUN"
     ;;
 esac

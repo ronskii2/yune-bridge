@@ -11,12 +11,25 @@ $Source = if ($env:YUNE_BRIDGE_SOURCE) { $env:YUNE_BRIDGE_SOURCE } else { "__BRI
 if ($Source -like "__*__") { $Source = "github" }
 $Build = "__BRIDGE_BUILD__"
 if ($Build -like "__*__") { $Build = "" }
+# язык сообщений: подставляет сайт (язык витрины); из репозитория — язык Windows; мосту — тот же (код привязки)
+$Ui = if ($env:YUNE_LANG) { $env:YUNE_LANG } else { "__YUNE_LANG__" }
+if ($Ui -like "__*__" -or -not $Ui) { $Ui = (Get-Culture).TwoLetterISOLanguageName }
+if (@("ja", "en", "ru") -notcontains $Ui) { $Ui = "en" }
+$env:YUNE_LANG = $Ui
+$Msg = @{
+  ja = @{ python = "Python 3.11 以上が必要です（python.org または Microsoft Store）"; download = "ブリッジをダウンロード中: {0}";
+          verify = "ブリッジのアーカイブがビルドの検証に通りませんでした"; done = "完了: ブリッジを起動しました。Windows にサインインすると自動で起動します。" }
+  en = @{ python = "Python 3.11 or newer is required (python.org or Microsoft Store)"; download = "Downloading the bridge: {0}";
+          verify = "The bridge archive failed the build check"; done = "Done: the bridge is running and starts when you sign in to Windows." }
+  ru = @{ python = "Нужен Python 3.11 или новее (python.org или Microsoft Store)"; download = "Скачиваю мост: {0}";
+          verify = "Архив моста не прошёл проверку сборки"; done = "Готово: мост запущен и стартует сам при входе в Windows." }
+}[$Ui]
 $Repo = "https://github.com/ronskii2/yune-bridge"
 $App = Join-Path $HOME ".yune-bridge-app"
 $Py = (Get-Command py -ErrorAction SilentlyContinue)
 if ($Py) { $PyCmd = "py"; $PyArgs = @("-3") } else { $PyCmd = "python"; $PyArgs = @() }
 & $PyCmd @PyArgs -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
-if ($LASTEXITCODE -ne 0) { Write-Error "Нужен Python 3.11 или новее (python.org или Microsoft Store)"; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Error $Msg.python; exit 1 }
 
 if ($Source -eq "github") {
   $Zip = if ($Build) { "$Repo/releases/download/$Build/yune-bridge.zip" } else { "$Repo/releases/latest/download/yune-bridge.zip" }
@@ -28,7 +41,7 @@ New-Item -ItemType Directory -Force -Path $App | Out-Null
 Set-Location $App
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("yune-bridge-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
-Write-Host "Скачиваю мост: $Zip"
+Write-Host ($Msg.download -f $Zip)
 Invoke-WebRequest $Zip -OutFile (Join-Path $Tmp "bridge.zip") -UseBasicParsing
 # хеш содержимого считает сам установщик (тот же алгоритм, что update.build_of) — не код из архива; не сошлось — стоп
 $Verify = @'
@@ -54,7 +67,7 @@ Set-Content -Path (Join-Path $Tmp "verify.py") -Value $Verify -Encoding ASCII
 $VerifyArgs = @((Join-Path $Tmp "verify.py"), (Join-Path $Tmp "bridge.zip"), (Join-Path $Tmp "x"))
 if ($Build) { $VerifyArgs += $Build }
 & $PyCmd @PyArgs @VerifyArgs
-if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $Tmp; Write-Error "Архив моста не прошёл проверку сборки"; exit 1 }
+if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $Tmp; Write-Error $Msg.verify; exit 1 }
 Remove-Item -Recurse -Force claude_bridge, requirements.txt -ErrorAction SilentlyContinue   # прежняя сборка целиком
 Move-Item (Join-Path $Tmp "x\claude_bridge") .
 Move-Item (Join-Path $Tmp "x\requirements.txt") .
@@ -78,4 +91,4 @@ $Settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New
 Register-ScheduledTask -TaskName "Yune bridge" -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
 Stop-ScheduledTask -TaskName "Yune bridge" -ErrorAction SilentlyContinue   # повторная установка — с новым мостом и кодом
 Start-ScheduledTask -TaskName "Yune bridge"
-Write-Host "Готово: мост запущен и стартует сам при входе в Windows."
+Write-Host $Msg.done

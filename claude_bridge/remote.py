@@ -72,7 +72,39 @@ def save(cfg: dict) -> None:
 # ── привязка ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 PENDING = os.path.join(CONFIG_DIR, "pending.json")      # код показан, ввода ждёт запущенный мост (pair --no-wait)
-EXPIRED = "Код истёк или отклонён — запустите привязку заново"
+
+# Что видит человек в терминале — на его языке: YUNE_LANG (ставит установщик: язык сайта, с которого он скачан), язык,
+# сохранённый при привязке (config.json «lang»), системная локаль; иначе английский
+TEXT = {
+    "no_code": {"ja": "サイトからコードを取得できませんでした: {error}", "en": "The site did not give a code: {error}",
+                "ru": "Сайт не дал код: {error}"},
+    "code": {"ja": "\n接続コード: {code}\nYune の「接続」→「マシンを接続」を開き、このコードを入力してください（有効期限 10 分）。\n",
+             "en": "\nPairing code: {code}\nOpen Yune → Connections → Connect a machine and enter this code (valid for 10 minutes).\n",
+             "ru": "\nКод привязки: {code}\nОткройте Yune → «Подключения» → «Подключить машину» и введите этот код (действует 10 минут).\n"},
+    "paired": {"ja": "完了: 「{name}」を接続しました。起動: python -m claude_bridge.remote run",
+               "en": "Done: “{name}” is connected. Start it: python -m claude_bridge.remote run",
+               "ru": "Готово: «{name}» привязана. Запустите: python -m claude_bridge.remote run"},
+    "expired": {"ja": "コードの有効期限が切れたか、拒否されました。もう一度接続してください",
+                "en": "The code expired or was declined — run pairing again",
+                "ru": "Код истёк или отклонён — запустите привязку заново"},
+    "not_paired": {"ja": "このマシンはまだ接続されていません: python -m claude_bridge.remote pair <Yune のアドレス>",
+                   "en": "This machine is not paired yet: python -m claude_bridge.remote pair <Yune address>",
+                   "ru": "Машина не привязана: python -m claude_bridge.remote pair <адрес Yune>"},
+    "computer": {"ja": "パソコン", "en": "Computer", "ru": "Компьютер"},
+}
+
+
+def lang() -> str:
+    for value in (os.environ.get("YUNE_LANG"), load().get("lang") if os.path.exists(CONFIG) else None,
+                  os.environ.get("LC_ALL"), os.environ.get("LANG")):
+        code = (value or "").strip().lower()[:2]
+        if code in ("ja", "en", "ru"):
+            return code
+    return "en"
+
+
+def say(key: str, **kw) -> str:
+    return TEXT[key][lang()].format(**kw)
 
 
 async def pair(site: str, name: str, wait: bool = True) -> None:
@@ -86,11 +118,9 @@ async def pair(site: str, name: str, wait: bool = True) -> None:
         async with s.post(f"{site}/api/connections/pair", json=info) as resp:
             data = await resp.json(content_type=None)
         if not data.get("ok"):
-            sys.exit(f"Сайт не дал код: {data.get('error') or resp.status}")
-        print(f"\nКод привязки: {data['code']}\n"
-              f"Откройте Yune → «Подключения» → «Подключить машину» и введите этот код (действует 10 минут).\n",
-              flush=True)
-        pending = {"site": site, "pair_id": data["pair_id"], "secret": data["secret"], "name": name}
+            sys.exit(say("no_code", error=data.get("error") or resp.status))
+        print(say("code", code=data["code"]), flush=True)
+        pending = {"site": site, "pair_id": data["pair_id"], "secret": data["secret"], "name": name, "lang": lang()}
         if not wait:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with open(PENDING, "w", encoding="utf-8") as f:
@@ -99,8 +129,8 @@ async def pair(site: str, name: str, wait: bool = True) -> None:
                 os.chmod(PENDING, 0o600)
             return
         if not await await_pair(s, pending):
-            sys.exit(EXPIRED)
-        print(f"Готово: «{name}» привязана. Запустите: python -m claude_bridge.remote run")
+            sys.exit(say("expired"))
+        print(say("paired", name=name))
 
 
 async def await_pair(s: aiohttp.ClientSession, pending: dict) -> bool:
@@ -115,7 +145,8 @@ async def await_pair(s: aiohttp.ClientSession, pending: dict) -> bool:
             continue
         if state.get("state") == "done":
             cfg = load()
-            cfg.update(site=pending["site"], machine_id=state["machine_id"], token=state["token"], name=pending["name"])
+            cfg.update(site=pending["site"], machine_id=state["machine_id"], token=state["token"], name=pending["name"],
+                       lang=pending.get("lang") or lang())
             cfg.setdefault("roots", DEFAULT_ROOTS)
             cfg.setdefault("folders", [])
             save(cfg)
@@ -337,13 +368,13 @@ class Tunnel:
 
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
-    p = argparse.ArgumentParser(prog="python -m claude_bridge.remote", description="Мост Yune на этой машине")
+    p = argparse.ArgumentParser(prog="python -m claude_bridge.remote", description="Yune bridge on this machine")
     sub = p.add_subparsers(dest="cmd", required=True)
-    pp = sub.add_parser("pair", help="привязать машину к Yune")
-    pp.add_argument("site", help="адрес Yune, например https://yune.jp")
-    pp.add_argument("--name", default=platform.node() or "Компьютер", help="как машина будет называться в Yune")
+    pp = sub.add_parser("pair", help="connect this machine to Yune")
+    pp.add_argument("site", help="Yune address, e.g. https://yune.jp")
+    pp.add_argument("--name", default=platform.node() or say("computer"), help="machine name shown in Yune")
     pp.add_argument("--no-wait", action="store_true")   # показать код и выйти; ввода ждёт мост (run) — так зовёт установщик
-    sub.add_parser("run", help="работать (держит связь с Yune)")
+    sub.add_parser("run", help="run (keeps the connection to Yune)")
     args = p.parse_args()
     if args.cmd == "pair":
         asyncio.run(pair(args.site, args.name, wait=not args.no_wait))
@@ -351,10 +382,10 @@ def main() -> None:
     cfg = load()
     if not cfg.get("token") and os.path.exists(PENDING):
         if not asyncio.run(finish_pending()):
-            sys.exit(EXPIRED)
+            sys.exit(say("expired"))
         cfg = load()
     if not cfg.get("token"):
-        sys.exit("Машина не привязана: python -m claude_bridge.remote pair <адрес Yune>")
+        sys.exit(say("not_paired"))
     tunnel = Tunnel(cfg)
     asyncio.run(tunnel.run())
     if tunnel.restart:

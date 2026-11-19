@@ -14,7 +14,8 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
   GET  /sessions                     список сессий
-  POST /sessions                     {project, agent?, model?, effort?, access?} → сессия
+  POST /sessions                     {project, agent?, model?, effort?, access?, rules?} → сессия; rules — права
+                                     агента Yune (rules.py), мост проверяет каждое действие
   GET  /sessions/{id}?before=&limit= сессия + события
   POST /sessions/{id}/send           {text, files?: [fid], answer?: {mode, rules, short}, mode?: auto | now | later}
                                      answer — режим ответа на сайте; агент работает — сообщение в очередь (auto)
@@ -139,7 +140,8 @@ def make_app(bridge: Bridge) -> web.Application:
             if not card:
                 raise BridgeError("нет такого проекта")
             session = bridge.create(project, body.get("model"), body.get("effort"), str(body.get("agent") or "claude"),
-                                    intro=device_note(body.get("device")), access=body.get("access"))
+                                    intro=device_note(body.get("device")), access=body.get("access"),
+                                    rules=body.get("rules") if isinstance(body.get("rules"), dict) else None)
         except BridgeError as e:
             return _error(str(e))
         return _json({"ok": True, "session": session.public()})

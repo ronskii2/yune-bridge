@@ -34,6 +34,11 @@ context — заполненность контекста, session — карт�
 Claude Code меняет режим сразу (set_permission_mode живому процессу; хук и can_use_tool читают режим на каждом вызове),
 Codex — со следующего хода (codex_session: песочница workspace-write / read-only вместо --dangerously-bypass…).
 
+Права агента (rules.py, столбец rules; сессия, которую сайт открыл от агента Yune): какие файлы читать и писать, какие
+команды сам / с вопросом / нельзя. Сайт задаёт их при создании, сменить их нельзя (новые права — новая сессия); хук
+решает каждое действие (отказ — заметкой code rule_denied в ленте), режим SDK у такой сессии — default. Режим доступа
+действует поверх: «Спрашивать» и «Только чтение» строже прав, «Полный» их не отменяет. Только Claude Code (у Codex хука нет).
+
 Вопрос с вариантами (AskUserQuestion) приходит в can_use_tool даже в bypassPermissions (проверено 04.11.2026) —
 ход ждёт ответа владельца с сайта. Местное расширение (extension.py) может добавить свои тулы — например, запрос
 ключа в закрытое поле на сайте (события secret / secret_done, ответ — POST /sessions/{id}/secret).
@@ -79,6 +84,7 @@ except ImportError:  # pragma: no cover
     RateLimitEvent = None
 
 from . import agents, extension, projects
+from . import rules as agent_rules
 
 warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 
@@ -111,6 +117,7 @@ READ_TOOLS = frozenset({
     "BashOutput", "TaskOutput", "KillShell", "KillBash", "ListMcpResourcesTool", "ReadMcpResourceTool", "Skill",
     "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
     "mcp__lozhka__send_file",                                   # показать файл; тулы расширения — extension READ_TOOLS
+    "mcp__yune__agent_propose",       # предложить агента: только предложение, включает пользователь (и в «Только чтение»)
 })
 # Инструменты MCP по глаголу в имени: get_issue, list_pages, image_list, job_status, fetch_url — чтение
 READ_VERBS = frozenset({"get", "list", "read", "search", "find", "fetch", "view", "describe", "status", "guide",
@@ -210,7 +217,7 @@ CREATE INDEX IF NOT EXISTS outbox_session_idx ON outbox (session, ts);
 """
 # Столбцы, добавленные позже (SQLite: ADD COLUMN без IF NOT EXISTS — проверяем сами)
 COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin": "TEXT", "resume_at": "REAL",
-           "access": "TEXT NOT NULL DEFAULT 'full'"}
+           "access": "TEXT NOT NULL DEFAULT 'full'", "rules": "TEXT"}
 
 
 class BridgeError(Exception):
@@ -309,7 +316,23 @@ class Session:
                            "parts": [t for t in q.get("parts") or [] if t] or None, "hold": bool(q.get("hold"))} for q in self.outbox],
                 "resume_at": r.get("resume_at"), "steer": self.steer,
                 # режим доступа: поле есть — мост умеет режимы (сайт показывает значок под полем; старые мосты — без него)
-                "access": self.access, "access_modes": list(self.access_modes)}
+                "access": self.access, "access_modes": list(self.access_modes),
+                # права агента (rules.py): есть — сессия идёт от агента Yune, мост проверяет каждое действие
+                "rules": self.rules}
+
+    @property
+    def rules(self) -> dict | None:
+        raw = self.row.get("rules")
+        if not raw:
+            return None
+        try:
+            return agent_rules.clean(json.loads(raw))
+        except ValueError:
+            return None
+
+    def _sdk_mode(self) -> str:
+        """Режим SDK: у сессии с правами агента — default (каждое действие решает хук), иначе — по режиму доступа."""
+        return "default" if self.rules else SDK_MODE[self.access]
 
     @property
     def access(self) -> str:
@@ -362,7 +385,7 @@ class Session:
         r = self.row
         return ClaudeAgentOptions(
             cli_path=CLI, cwd=r["cwd"], model=MODELS.get(r["model"], MODELS[DEFAULT_MODEL])[1], effort=r["effort"],
-            permission_mode=SDK_MODE[self.access], can_use_tool=self._can_use_tool,
+            permission_mode=self._sdk_mode(), can_use_tool=self._can_use_tool,
             # режим доступа — на каждом вызове инструмента (меняется посреди сессии без перезапуска процесса)
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool])]},
             # тулы местного расширения (extension.py) — рядом с «показать файл»
@@ -603,6 +626,19 @@ class Session:
         мнения ({}); read — отказ сразу; ask — «спросить»: вызов уходит в can_use_tool, там ждём владельца."""
         name = str((data or {}).get("tool_name") or "")
         access = self.access
+        rules = self.rules
+        if rules and name != "AskUserQuestion":
+            # права агента: нельзя — отказ сразу; спросить — карточка; можно — дальше решает режим доступа сессии
+            verdict, why = self._rule(rules, name, (data or {}).get("tool_input") or {})
+            if verdict == "deny":
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                               "permissionDecisionReason": why}}
+            if verdict == "ask" or (access == "ask" and not reads(name)):
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}}
+            if access == "read" and not reads(name):
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                               "permissionDecisionReason": DENY_READ}}
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
         if access in ("full", "auto") or reads(name):
             return {}                           # auto — решает сам Claude Code; спросит — придёт в can_use_tool
         if access == "read":
@@ -610,7 +646,25 @@ class Session:
                                            "permissionDecisionReason": DENY_READ}}
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}}
 
+    def _rule(self, rules: dict, name: str, inp: dict) -> tuple[str, str]:
+        """Решение по правам агента; отказ — заметкой в ленту (сайт собирает из них журнал прав агента)."""
+        verdict, why = agent_rules.decide(rules, name, inp, self.row["cwd"], reads(name))
+        if verdict == "deny":
+            what = inp.get("command") or inp.get("file_path") or inp.get("notebook_path") or inp.get("path") or name
+            self._event({"kind": "note", "code": "rule_denied", "name": name, "what": str(what)[:200], "text": why})
+        return verdict, why
+
     async def _can_use_tool(self, name: str, inp: dict, ctx):
+        rules = self.rules
+        if rules and name != "AskUserQuestion":
+            verdict, why = agent_rules.decide(rules, name, inp, self.row["cwd"], reads(name))
+            if verdict == "deny":
+                return PermissionResultDeny(message=why)
+            if verdict == "ask" or (self.access == "ask" and not reads(name)):
+                return await self._permit(name, inp, ctx)
+            if self.access == "read" and not reads(name):
+                return PermissionResultDeny(message=DENY_READ)
+            return PermissionResultAllow(updated_input=inp)
         if name != "AskUserQuestion":
             access = self.access
             if access == "full" or reads(name):
@@ -666,7 +720,7 @@ class Session:
         if not client:
             return                          # следующий процесс поднимется с новым режимом (_options)
         try:
-            await client.set_permission_mode(SDK_MODE[self.access])
+            await client.set_permission_mode(self._sdk_mode())
         except Exception as e:  # noqa: BLE001
             # старый CLI не умеет менять режим на ходу — хук и can_use_tool всё равно смотрят на новый режим; режим
             # SDK (bypass → default) — с перезапуском процесса, когда ход закончится
@@ -961,7 +1015,8 @@ class Bridge:
         return out
 
     def create(self, project: str, model: str | None, effort: str | None, agent: str | None = None,
-               intro: str | None = None, origin: str | None = None, access: str | None = None) -> Session:
+               intro: str | None = None, origin: str | None = None, access: str | None = None,
+               rules: dict | None = None) -> Session:
         card = projects.resolve(project)
         if not card:
             raise BridgeError("нет такого проекта")
@@ -971,11 +1026,16 @@ class Bridge:
         model = model if agents.valid_model(agent, model) else agents.DEFAULTS[agent][0]
         effort = effort if effort in EFFORTS else agents.DEFAULTS[agent][1]
         access = access if access in ACCESS else "full"
+        rules = agent_rules.clean(rules)
+        if rules and agent != "claude":
+            raise BridgeError("права агента — только у Claude Code")  # i18n: internal
+        if rules:                               # агент знает свои права с первого сообщения
+            intro = agent_rules.summary(rules) + (intro or "")
         sid, now = uuid.uuid4().hex[:12], time.time()
         self.db.execute("INSERT INTO sessions (id, project, project_name, cwd, model, effort, created, updated, agent, "
-                        "intro, origin, access) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "intro, origin, access, rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (sid, card["id"], card["name"], card["path"], model, effort, now, now, agent, intro, origin,
-                         access))
+                         access, json.dumps(rules, ensure_ascii=False) if rules else None))
         session = self.get(sid)
         self.publish({"session": sid, "kind": "session", "session": session.public()})
         return session

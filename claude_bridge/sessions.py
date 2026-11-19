@@ -217,11 +217,25 @@ CREATE INDEX IF NOT EXISTS outbox_session_idx ON outbox (session, ts);
 """
 # Столбцы, добавленные позже (SQLite: ADD COLUMN без IF NOT EXISTS — проверяем сами)
 COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin": "TEXT", "resume_at": "REAL",
-           "access": "TEXT NOT NULL DEFAULT 'full'", "rules": "TEXT"}
+           "access": "TEXT NOT NULL DEFAULT 'full'", "rules": "TEXT",
+           # кэш контекста у Anthropic (сайт предлагает сжать, когда он остывает): время последнего запроса хода, срок
+           # жизни (подписка — час, ключ API и докупка сверх лимита — 5 минут) и размер контекста в токенах
+           "cache_at": "REAL", "cache_ttl": "INTEGER", "ctx_tokens": "INTEGER"}
 
 
 class BridgeError(Exception):
     pass
+
+
+def _cache_fields(usage: dict | None, row: dict) -> dict:
+    """Ход прочёл или записал кэш — кэш живёт заново с конца хода; срок — по тому, куда Claude Code писал (1h / 5m).
+    Ход без запросов к API (ошибка до запроса) кэш не трогает."""
+    usage = usage or {}
+    made = usage.get("cache_creation") or {}
+    if not (usage.get("cache_read_input_tokens") or usage.get("cache_creation_input_tokens")):
+        return {}
+    ttl = 3600 if made.get("ephemeral_1h_input_tokens") else 300 if made.get("ephemeral_5m_input_tokens") else row.get("cache_ttl")
+    return {"cache_at": time.time(), "cache_ttl": ttl}
 
 
 def _trim(value, limit: int = TRIM):
@@ -310,6 +324,7 @@ class Session:
                 "project_name": r["project_name"], "cwd": r["cwd"], "model": r["model"], "effort": r["effort"],
                 "agent": r.get("agent") or "claude", "origin": r.get("origin"),
                 "created": r["created"], "updated": r["updated"], "context": r["context"], "cost": r["cost"],
+                "cache_at": r.get("cache_at"), "cache_ttl": r.get("cache_ttl"), "ctx_tokens": r.get("ctx_tokens"),
                 "status": self.status, "live": bool(self.client),
                 "pending": [{"rid": rid, "kind": kind} for rid, (kind, _f) in self.pending.items()],
                 "queue": [{"qid": q["qid"], "ts": q["ts"], "text": q["text"], "files": q.get("files_info") or [],
@@ -520,7 +535,7 @@ class Session:
             if msg.session_id and msg.session_id != self.row["claude_id"]:
                 self.bridge.update(self.id, claude_id=msg.session_id)
             cost = msg.total_cost_usd or 0.0
-            self.bridge.update(self.id, cost=(self.row["cost"] or 0) + cost)
+            self.bridge.update(self.id, cost=(self.row["cost"] or 0) + cost, **_cache_fields(msg.usage, self.row))
             reason = getattr(msg, "terminal_reason", None) or ""
             self._event({"kind": "result", "cost": cost, "ms": msg.duration_ms, "turns": msg.num_turns,
                          "error": bool(msg.is_error), "errors": (msg.errors or [])[:5],
@@ -603,7 +618,7 @@ class Session:
             log.info("[%s] context usage: %s", self.id, e)
             return
         percent = round(float(usage.get("percentage") or 0), 1)
-        self.bridge.update(self.id, context=percent)
+        self.bridge.update(self.id, context=percent, ctx_tokens=int(usage.get("totalTokens") or 0) or None)
         self._live({"kind": "context", "percent": percent, "total": usage.get("totalTokens"),
                     "max": usage.get("maxTokens")})
 
@@ -880,6 +895,14 @@ class Session:
             self._event({"kind": "error", "code": "start", "text": str(e)[:500]})
             self._set_status("idle")
 
+    async def compact(self) -> None:
+        """«Сжать контекст» с сайта (кэш остыл или вот-вот остынет): /compact Claude Code — без пометок режима ответа и
+        доступа, они стали бы указаниями для выжимки."""
+        if (self.row.get("agent") or "claude") != "claude" or self.status != "idle":
+            raise BridgeError("compact: Claude Code, idle only")     # сайт кнопку иначе не показывает
+        self.turn_failed = self.stopped = False
+        await self._submit("/compact", [])          # конец — событие compact_boundary («Контекст сжат») и итог хода
+
     async def stop(self) -> None:
         self.stopped = True
         self.cancel_resume()
@@ -950,7 +973,7 @@ class Bridge:
         self.db.execute(f"UPDATE sessions SET {cols} WHERE id = ?", (*fields.values(), sid))
         if sid in self.sessions:
             self.sessions[sid].row.update(fields)
-            if set(fields) & {"title", "model", "effort", "resume_at", "access"}:
+            if set(fields) & {"title", "model", "effort", "resume_at", "access", "cache_at"}:
                 self.publish({"session": sid, "kind": "session", "session": self.sessions[sid].public()})
 
     def add_event(self, sid: str, data: dict) -> dict:

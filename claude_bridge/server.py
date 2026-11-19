@@ -26,7 +26,7 @@ WebSocket моста; на машине, где работает сам сайт
   POST /sessions/{id}/answer         {rid, answers: {вопрос: ответ}}
   POST /sessions/{id}/secret         {rid, value} | {rid, cancel: true}
   POST /sessions/{id}/permit         {rid, decision: allow | deny | all, text?}   ответ на просьбу разрешения (режим ask)
-  POST /sessions/{id}/stop | delete
+  POST /sessions/{id}/stop | compact | delete
   POST /sessions/{id}/rename         {title, if_title?}   if_title — только если название всё ещё такое (автоназвание)
   POST /sessions/{id}/settings       {model?, effort?, access?: full | ask | read}   access — режим доступа сессии
   POST /sessions/{id}/handoff        {agent, model?, effort?} → новая сессия с выжимкой этой
@@ -205,6 +205,8 @@ def make_app(bridge: Bridge) -> web.Application:
                 session.resolve(str(body.get("rid")), "permission", {"decision": decision, "text": said})
             elif name == "stop":
                 await session.stop()
+            elif name == "compact":
+                await session.compact()
             elif name == "rename":
                 title = " ".join(str(body.get("title") or "").split())[:120]
                 if not title:

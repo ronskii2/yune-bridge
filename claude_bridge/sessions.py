@@ -456,11 +456,12 @@ class Session:
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] reader: %s", self.id, e)
             self._event({"kind": "error", "code": "process", "text": str(e)[:500]})
-        if self.client is client:
-            self.client = None
-            self.reader = None
-            self._set_status("idle")
-            self._live({"kind": "session", "session": self.public()})
+        if self.client is not client:       # закрыл close() — процесс гасит он; второй disconnect падал на None.returncode
+            return
+        self.client = None
+        self.reader = None
+        self._set_status("idle")
+        self._live({"kind": "session", "session": self.public()})
         # Чтение кончилось — процесс claude гасим: иначе он жил дальше без нас, доделывал ход втёмную (сообщение,
         # отправленное в идущий ход, — тоже), а следующее сообщение поднимало второй процесс на ту же беседу (14.11.2026)
         try:

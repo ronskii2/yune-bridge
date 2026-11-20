@@ -63,6 +63,8 @@ IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 class CodexSession(Session):
     steer = False
+    agent_id = "codex"
+    has_effort = True                    # уровень размышлений — параметр хода (у Gemini CLI его нет)
     access_notes = ACCESS_NOTE
 
     def __init__(self, bridge, row: dict):
@@ -138,7 +140,7 @@ class CodexSession(Session):
             stderr=asyncio.subprocess.PIPE, limit=32 * 1024 * 1024, start_new_session=os.name != "nt",
             env={**os.environ, "YUNE_MCP_TOKEN": sessions.YUNE_MCP["token"]} if sessions.YUNE_MCP else None)
         self._live({"kind": "session", "session": self.public()})
-        self.proc.stdin.write(text.encode())
+        self.proc.stdin.write(self._input(text, images).encode())
         await self.proc.stdin.drain()
         self.proc.stdin.close()
         err_task = asyncio.create_task(self._stderr(self.proc))
@@ -168,6 +170,10 @@ class CodexSession(Session):
                 self._event({"kind": "error", "code": "process", "text": f"exit {code}" + (f": {tail}" if tail else "")})
             self._event({"kind": "result", "cost": 0, "ms": int((time.monotonic() - self.started_at) * 1000),
                          "turns": 0, "error": not stopped})
+
+    def _input(self, text: str, images: list[str]) -> str:
+        """Текст хода в stdin (картинки Codex берёт флагами -i, gemini_session — ссылками @путь в тексте)."""
+        return text
 
     async def _stderr(self, proc) -> None:
         async for raw in proc.stderr:
@@ -312,15 +318,17 @@ class CodexSession(Session):
         """Модель и уровень — параметры запуска: действуют со следующего хода."""
         changes = {}
         if model and model != self.row["model"]:
-            if not agents.valid_model("codex", model):
+            if not agents.valid_model(self.agent_id, model):
                 raise BridgeError("нет такой модели")
             changes["model"] = model
-        if effort and effort != self.row["effort"]:
+        if effort and self.has_effort and effort != self.row["effort"]:
             if effort not in agents.EFFORTS:
                 raise BridgeError("нет такого уровня")
             changes["effort"] = effort
         if not changes:
             return
         self.bridge.update(self.id, **changes)
-        name = next((m["name"] for m in agents.models("codex") if m["id"] == self.row["model"]), self.row["model"])
-        self._event({"kind": "note", "text": f"Дальше: {name}, {self.row['effort']}"})
+        name = next((m["name"] for m in agents.models(self.agent_id) if m["id"] == self.row["model"]), self.row["model"])
+        if self.has_effort:
+            name += ", " + str(self.row["effort"])
+        self._event({"kind": "note", "text": f"Дальше: {name}"})

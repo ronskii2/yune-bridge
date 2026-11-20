@@ -1,11 +1,15 @@
-"""Агенты моста: Claude Code и Codex на этой машине — установлен ли, вошёл ли, модели и вход по ссылке.
+"""Агенты моста: Claude Code, Codex и Gemini CLI на этой машине — установлен ли, вошёл ли, модели и вход по ссылке.
 
 Каждый агент — свой CLI в домашней папке пользователя (тот же вход, что в терминале): Claude Code — `~/.local/bin/claude`
-(сессии — Claude Agent SDK, sessions.py), Codex — `codex` из npm (сессии — `codex exec --json`, codex_session.py).
+(сессии — Claude Agent SDK, sessions.py), Codex — `codex` из npm (сессии — `codex exec --json`, codex_session.py),
+Gemini CLI — `gemini` из npm (сессии — `gemini -o stream-json`, gemini_session.py).
 
 Вход — тем же CLI, что и в терминале, но без терминала: процесс входа идёт в псевдотерминале (pty), мост читает из
 него ссылку (и код устройства у Codex) и отдаёт сайту. Codex ждёт, пока человек введёт код на странице OpenAI, и сам
 завершается; Claude Code после входа на claude.com показывает код, его вставляют на сайте — мост пишет его в pty.
+Gemini CLI входит только из интерактивного режима (без терминала отказывает): мост запускает `gemini` в pty с
+NO_BROWSER=true, тот печатает ссылку Google и ждёт код со страницы codeassist.google.com — его вставляют на сайте, как
+у Claude Code; появился ~/.gemini/oauth_creds.json — вход есть, процесс гасим (дальше он открыл бы свой экран).
 Ссылки и коды входа живут только в памяти моста и в ответе сайту, в журнал не пишутся.
 """
 from __future__ import annotations
@@ -46,11 +50,17 @@ CLAUDE_CLI = _cli("CLAUDE_CLI", "claude", os.path.join(HOME, ".local/bin/claude"
 CODEX_CLI = _cli("CODEX_CLI", "codex", os.path.join(HOME, ".npm-global/bin/codex"), "/opt/homebrew/bin/codex",
                  "/usr/local/bin/codex")
 CODEX_HOME = os.environ.get("CODEX_HOME", os.path.join(HOME, ".codex"))
+GEMINI_CLI = _cli("GEMINI_CLI", "gemini", os.path.join(HOME, ".npm-global/bin/gemini"), "/opt/homebrew/bin/gemini",
+                  "/usr/local/bin/gemini")
+GEMINI_HOME = os.path.join(HOME, ".gemini")
+GEMINI_CREDS = os.path.join(GEMINI_HOME, "oauth_creds.json")
 STATUS_TTL = 60
 LOGIN_TTL = 15 * 60
 
 CLAUDE_MODELS = {"opus": ("Opus 5.5", "claude-opus-5-5"), "sonnet": ("Sonnet 5.5", "claude-sonnet-5-5"),
                  "fable": ("Fable 5.1", "claude-fable-5-1"), "haiku": ("Haiku 5.5", "claude-haiku-5-5")}
+DEFAULT_NAME = "По умолчанию"
+API_KEY = "ключ API"
 CLAUDE_HINTS = {"opus": "Самая сильная, по умолчанию", "sonnet": "Быстрее и дешевле", "fable": "Fable",
                 "haiku": "Самая быстрая"}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -72,7 +82,7 @@ def _codex_config() -> dict:
 def codex_models() -> list[dict]:
     """Модели Codex: «по умолчанию» (модель из ~/.codex/config.toml) и те, что Codex показывает в своём списке."""
     default = _codex_config().get("model") or ""
-    out = [{"id": "default", "name": "По умолчанию", "hint": default}]
+    out = [{"id": "default", "name": DEFAULT_NAME, "hint": default}]
     try:
         with open(os.path.join(CODEX_HOME, "models_cache.json"), encoding="utf-8") as f:
             cache = json.load(f)
@@ -88,14 +98,67 @@ def codex_context_window() -> int:
     return int(_codex_config().get("model_context_window") or 272000)
 
 
+# Gemini CLI — псевдонимы моделей (-m pro|flash|flash-lite): CLI сам ведёт их на текущие модели, список не устаревает.
+# Подсказки — те же строки, что у Claude (их переводит каталог сайта): у моста нет своих переводов
+GEMINI_MODELS = [{"id": "default", "name": DEFAULT_NAME, "hint": "auto"},
+                 {"id": "pro", "name": "Gemini Pro", "hint": ""},
+                 {"id": "flash", "name": "Gemini Flash", "hint": CLAUDE_HINTS["sonnet"]},
+                 {"id": "flash-lite", "name": "Gemini Flash Lite", "hint": CLAUDE_HINTS["haiku"]}]
+
+
 def models(agent: str) -> list[dict]:
     if agent == "codex":
         return codex_models()
+    if agent == "gemini":
+        return [dict(m) for m in GEMINI_MODELS]
     return [{"id": k, "name": v[0], "hint": CLAUDE_HINTS.get(k, "")} for k, v in CLAUDE_MODELS.items()]
 
 
-DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high")}
-NAMES = {"claude": "Claude Code", "codex": "Codex"}
+DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), "gemini": ("default", "high")}
+NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
+CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI}
+
+
+def _gemini_settings_path() -> str:
+    return os.path.join(GEMINI_HOME, "settings.json")
+
+
+def gemini_login_state() -> tuple[bool, str]:
+    """(вошёл ли, чем): вход Google (~/.gemini/oauth_creds.json, почта — google_accounts.json) или ключ GEMINI_API_KEY."""
+    if os.path.exists(GEMINI_CREDS):
+        try:
+            with open(os.path.join(GEMINI_HOME, "google_accounts.json"), encoding="utf-8") as f:
+                email = str((json.load(f) or {}).get("active") or "")
+        except (OSError, ValueError, AttributeError):
+            email = ""
+        return True, email or "Google"
+    if os.environ.get("GEMINI_API_KEY"):
+        return True, API_KEY
+    return False, ""
+
+
+def gemini_prepare_login() -> None:
+    """Вход Google выбирается в настройках Gemini CLI (security.auth.selectedType); без выбора он показал бы экран выбора
+    способа входа. Ставим oauth-personal, только если способ ещё не выбран; остальное в файле не трогаем."""
+    path = _gemini_settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        raise AgentError("Не разобрала ~/.gemini/settings.json — войдите в терминале: gemini")
+    if not isinstance(data, dict):
+        raise AgentError("Не разобрала ~/.gemini/settings.json — войдите в терминале: gemini")
+    auth = data.setdefault("security", {}).setdefault("auth", {})
+    if auth.get("selectedType"):
+        return
+    auth["selectedType"] = "oauth-personal"
+    os.makedirs(GEMINI_HOME, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def valid_model(agent: str, model: str | None) -> bool:
@@ -126,7 +189,7 @@ async def status(agent: str, fresh: bool = False) -> dict:
         info = dict(cached[1])
     else:
         info = {"id": agent, "name": NAMES[agent], "installed": False, "version": None, "logged_in": False, "account": ""}
-        cli = CLAUDE_CLI if agent == "claude" else CODEX_CLI
+        cli = CLIS[agent]
         if os.path.exists(cli):
             code, out = await _run(cli, "--version")
             if code == 0:
@@ -141,15 +204,18 @@ async def status(agent: str, fresh: bool = False) -> dict:
             info["logged_in"] = bool(data.get("loggedIn"))
             info["account"] = {"claude.ai": "подписка Claude", "console": "Anthropic Console"}.get(
                 data.get("authMethod") or "", data.get("authMethod") or "")
+        elif info["installed"] and agent == "gemini":
+            info["logged_in"], info["account"] = gemini_login_state()
         elif info["installed"]:
             code, out = await _run(cli, "login", "status")
             info["logged_in"] = code == 0 and "logged in" in out.lower() and "not logged" not in out.lower()
             info["account"] = ("подписка ChatGPT" if "chatgpt" in out.lower()
-                               else "ключ API" if "api key" in out.lower() else "")
+                               else API_KEY if "api key" in out.lower() else "")
         _status[agent] = (time.monotonic(), info)
         info = dict(info)
     model, effort = DEFAULTS[agent]
-    info.update(models=models(agent), efforts=list(EFFORTS), default_model=model, default_effort=effort,
+    info.update(models=models(agent), efforts=[] if agent == "gemini" else list(EFFORTS), default_model=model,
+                default_effort=effort,
                 login=LOGINS[agent].public() if agent in LOGINS else None)
     return info
 
@@ -186,13 +252,14 @@ class Login:
         self.state = "idle"
         self.url = ""
         self.code = ""              # код устройства (Codex): его вводят на странице OpenAI
-        self.needs_code = False     # Claude Code: код со страницы claude.com вставляют на сайте
+        self.needs_code = False     # Claude Code и Gemini CLI: код со страницы входа вставляют на сайте
         self.error = ""
         self.started = 0.0
         self.proc: asyncio.subprocess.Process | None = None
         self.fd = -1
         self.output = ""
         self.task: asyncio.Task | None = None
+        self.creds_mtime = 0.0      # Gemini CLI: вход есть, когда oauth_creds.json появился или обновился после старта
 
     def public(self) -> dict | None:
         if self.state == "idle":
@@ -209,25 +276,46 @@ class Login:
         if self.active():
             return self.public()
         if pty is None:
-            raise AgentError("На этой машине войдите в терминале: " + ("claude auth login" if self.agent == "claude"
-                                                                       else "codex login --device-auth"))
+            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login",
+                                                                       "gemini": "gemini"}.get(self.agent,
+                                                                                               "codex login --device-auth"))
         if not force and (await status(self.agent, fresh=True))["logged_in"]:
             raise AgentError("Уже вошли — войти заново можно только с подтверждением: текущий вход сотрётся")
         self.state, self.url, self.code, self.error, self.output = "starting", "", "", "", ""
-        self.needs_code = self.agent == "claude"
+        self.needs_code = self.agent in ("claude", "gemini")
         self.started = time.time()
+        env = dict(os.environ, BROWSER="/bin/false", NO_COLOR="1", TERM="dumb")
         if self.agent == "claude":
             argv = [CLAUDE_CLI, "auth", "login", "--claudeai"]
+        elif self.agent == "gemini":
+            try:
+                gemini_prepare_login()
+            except AgentError as e:
+                self.state, self.error = "failed", str(e)
+                return self.public()
+            if force and os.path.exists(GEMINI_CREDS):
+                # с прежним входом Gemini CLI ссылку не покажет — откладываем его, не вышло войти — вернём (_watch)
+                os.replace(GEMINI_CREDS, GEMINI_CREDS + ".bak")
+            self.creds_mtime = os.path.getmtime(GEMINI_CREDS) if os.path.exists(GEMINI_CREDS) else 0.0
+            argv = [GEMINI_CLI, "--skip-trust"]
+            env.update(NO_BROWSER="true", TERM="xterm-256color")    # с TERM=dumb экран Gemini CLI не рисуется
         else:
             argv = [CODEX_CLI, "login", "--device-auth"]
-        env = dict(os.environ, BROWSER="/bin/false", NO_COLOR="1", TERM="dumb")
         master, slave = pty.openpty()
+        if self.agent == "gemini":
+            import fcntl
+            import struct
+            import termios
+            # широкий терминал: ссылка входа (~600 знаков) не рвётся переносами экрана
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
         try:
             self.proc = await asyncio.create_subprocess_exec(*argv, stdin=slave, stdout=slave, stderr=slave, env=env,
                                                              cwd=HOME, start_new_session=True)
         except OSError as e:
             os.close(master)
             self.state, self.error = "failed", f"Агент не запустился: {e}"
+            if self.agent == "gemini" and os.path.exists(GEMINI_CREDS + ".bak") and not os.path.exists(GEMINI_CREDS):
+                os.replace(GEMINI_CREDS + ".bak", GEMINI_CREDS)
             return self.public()
         finally:
             os.close(slave)
@@ -256,6 +344,7 @@ class Login:
                 loop.remove_reader(self.fd)
 
         loop.add_reader(self.fd, readable)
+        creds = asyncio.create_task(self._gemini_creds()) if self.agent == "gemini" else None
         try:
             while True:
                 left = self.started + LOGIN_TTL - time.time()
@@ -271,6 +360,8 @@ class Login:
                 self.output = (self.output + data.decode(errors="replace"))[-20000:]
                 self._parse()
         finally:
+            if creds:
+                creds.cancel()
             try:
                 loop.remove_reader(self.fd)
             except (ValueError, OSError):
@@ -281,7 +372,7 @@ class Login:
             except OSError:
                 pass
             if self.state != "cancelled":
-                ok = code == 0
+                ok = code == 0 or self.agent == "gemini"      # Gemini CLI гасим сами, когда вход уже записан
                 if ok:
                     fresh = await status(self.agent, fresh=True)
                     ok = fresh["logged_in"]
@@ -289,7 +380,31 @@ class Login:
                 if not ok and not self.error:
                     tail = [ln for ln in ANSI.sub("", self.output).splitlines() if ln.strip()][-1:]
                     self.error = (tail[0].strip() if tail else "Вход не завершился")[:300]
+            bak = GEMINI_CREDS + ".bak"
+            if self.agent == "gemini" and os.path.exists(bak):
+                if os.path.exists(GEMINI_CREDS):
+                    os.remove(bak)
+                else:
+                    os.replace(bak, GEMINI_CREDS)           # новый вход не случился — прежний на место
+                    _status.pop("gemini", None)
             log.info("вход в %s: %s", self.agent, self.state)
+
+    async def _gemini_creds(self) -> None:
+        """Gemini CLI после кода не выходит, а открывает свой экран: вход записан (oauth_creds.json новее старта) —
+        гасим процесс, _watch увидит конец вывода и проверит вход."""
+        while self.active():
+            await asyncio.sleep(1)
+            try:
+                mtime = os.path.getmtime(GEMINI_CREDS)
+            except OSError:
+                continue
+            if mtime > self.creds_mtime:
+                await asyncio.sleep(1)                       # файл дописывается, почта — следом в google_accounts.json
+                try:
+                    self.proc.terminate()
+                except (OSError, ProcessLookupError):
+                    pass
+                return
 
     async def _reap(self) -> int:
         """Дождаться процесса входа (он уже закрыл pty или его гасят) → код выхода."""
@@ -309,6 +424,12 @@ class Login:
             if re.search(r"(?i)login successful|logged in", ANSI.sub("", raw[-500:])):
                 self.state = "code_sent"
             return
+        if self.agent == "gemini":
+            m = re.search(r"https://accounts\.google\.com/o/oauth2/[^\s\x07\x1b]+", ANSI.sub("", self.output))
+            if m and not self.url:
+                self.url = m.group(0)
+                self.state = "waiting"
+            return
         text = ANSI.sub("", self.output)
         if not self.url:
             m = re.search(r"https://auth\.openai\.com/\S+", text)
@@ -322,9 +443,9 @@ class Login:
             self.state = "waiting"
 
     def send_code(self, code: str) -> dict:
-        """Claude Code: код со страницы claude.com → в pty процесса входа."""
+        """Claude Code и Gemini CLI: код со страницы входа → в pty процесса входа."""
         code = code.strip()
-        if self.agent != "claude" or self.state != "waiting":
+        if self.agent not in ("claude", "gemini") or self.state != "waiting":
             raise AgentError("Этот вход кода не ждёт")
         if not code or len(code) > 400 or any(ch in code for ch in "\r\n"):
             raise AgentError("Вставьте код со страницы входа")

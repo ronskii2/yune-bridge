@@ -1,4 +1,4 @@
-"""Мост Yune: сессии Claude Code и Codex на этой машине для сайта (remote.py — ПК, server.py — HTTP моста)."""
+"""Мост Yune: сессии Claude Code, Codex и Gemini CLI на этой машине для сайта (remote.py — ПК, server.py — HTTP моста)."""
 import os
 import ssl
 

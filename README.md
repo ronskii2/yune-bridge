@@ -1,7 +1,7 @@
 # Yune bridge
 
 The bridge is a small program you run on your own computer (macOS, Linux or Windows) so that you can work with
-**Claude Code** and **Codex** on that machine from [Yune](https://yune.jp) → *Connections*: start sessions in your
+**Claude Code**, **Codex** and **Gemini CLI** on that machine from [Yune](https://yune.jp) → *Connections*: start sessions in your
 projects, watch the agent's replies and steps, answer its questions, send files, talk to it by voice — from the browser
 or your phone.
 
@@ -12,8 +12,10 @@ This repository is the complete source of the bridge that Yune installs and upda
 - **Outgoing connection only.** The bridge opens one WebSocket to Yune (`/api/connections/link`) and keeps it alive.
   It does not listen on any public port: its local HTTP server binds to `127.0.0.1` on a random port and requires a
   random per-run token. Yune sends requests through that WebSocket; the bridge answers them.
-- **Agents are yours.** The bridge drives the `claude` and `codex` CLIs that are already installed and logged in on
-  your machine (Claude Agent SDK, `codex exec --json`). Your subscription, settings and skills are used as is.
+- **Agents are yours.** The bridge drives the `claude`, `codex` and `gemini` CLIs that are already installed and logged
+  in on your machine (Claude Agent SDK, `codex exec --json`, `gemini -o stream-json`). Your subscription, settings and
+  skills are used as is. Logging in to Gemini CLI from Yune sets `security.auth.selectedType` to `oauth-personal` in
+  `~/.gemini/settings.json` only if no auth type is chosen yet.
 - **Pairing.** `python -m claude_bridge.remote pair <site>` shows a one-time code; you enter it in Yune. The machine
   key is stored in `~/.yune-bridge/config.json` (mode 600); Yune keeps only its hash. "Disconnect machine" in Yune
   revokes the key and the bridge stops.
@@ -31,7 +33,7 @@ Sent (so that you can see it in Yune):
 Not sent:
 
 - your source code as a whole — only what appears in the session feed (the agent's tool output, which you see too);
-- your API keys, tokens or agent credentials (`~/.claude`, `~/.codex` stay on the machine; login links and codes are
+- your API keys, tokens or agent credentials (`~/.claude`, `~/.codex`, `~/.gemini` stay on the machine; login links and codes are
   only relayed to your browser while you log in);
 - anything from folders outside the configured project roots, unless an agent in a session reads it.
 
@@ -46,6 +48,9 @@ Each session has an access mode, switchable at any time from the icon under the 
   need no approval. Codex runs in the `workspace-write` sandbox (edits only inside the project, no network), since
   `codex exec` cannot ask per action.
 - **Read only** — Claude Code may only read and search; Codex runs in the `read-only` sandbox.
+
+Gemini CLI uses its approval modes: Full — `yolo`, Auto — `auto_edit` (edits files, no shell commands), Ask —
+`default` (headless Gemini CLI cannot ask, so only reading and searching run), Read only — `plan`.
 
 Only connect machines and projects you are comfortable an agent working in.
 

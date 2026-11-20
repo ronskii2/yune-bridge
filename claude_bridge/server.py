@@ -11,6 +11,7 @@ WebSocket моста; на машине, где работает сам сайт
   POST /agents/{agent}/login         {action: start | code | cancel, code?}
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py);
                                      у Claude — и переключатель автосжатия (auto_compact)
+  POST /agents/{agent}/update        обновить CLI агента (claude update / npm -g …@latest); идёт его ход — 409 busy
   POST /settings                     {auto_compact: bool} — настройки моста, общие на все сессии
   GET  /context?project=             стартовый контекст Claude Code в папке: правила, память, скиллы, MCP, база (context.py)
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
@@ -98,6 +99,16 @@ def make_app(bridge: Bridge) -> web.Application:
     async def agent_list(request):
         return _json({"ok": True, "agents": await agents.listing(fresh=request.query.get("fresh") == "1"),
                       "machine": agents.machine()})
+
+    async def agent_update(request):
+        agent = request.match_info["agent"]
+        # идёт ход этого агента — не трогаем (обновление подменило бы CLI под работающей сессией); сайт повторит позже
+        if any((x.row.get("agent") or "claude") == agent and x.status != "idle" for x in bridge.sessions.values()):
+            return _json({"ok": False, "error": "busy"}, 409)
+        try:
+            return _json({"ok": True, **await agents.update(agent)})
+        except agents.UpdateError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
 
     async def limit_get(request):
         agent = request.query.get("agent") or "claude"
@@ -304,6 +315,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/health", health)
     r.add_get("/meta", meta)
     r.add_get("/agents", agent_list)
+    r.add_post("/agents/{agent}/update", agent_update)
     r.add_get("/limits", limit_get)
     r.add_post("/settings", settings_set)
     r.add_get("/context", context_get)

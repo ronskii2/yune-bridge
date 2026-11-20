@@ -327,6 +327,40 @@ async def _run(*args: str, timeout: float = 15) -> tuple[int, str]:
 
 _status: dict[str, tuple[float, dict]] = {}
 
+# Обновление агента (сайт: «Доступна новая версия — Обновить / Обновлять всегда»). Claude Code обновляет себя сам
+# (`claude update`); агенты из npm — `npm install -g <пакет>@latest`, если стоят через npm (иначе — руками, как ставили).
+# Пакет npm — и для сверки с последней версией на сайте (тот же список)
+NPM = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "gemini": "@google/gemini-cli"}
+UPDATE_TIMEOUT = 600
+
+
+class UpdateError(Exception):
+    """Обновить нельзя: code — manual (не через npm) | failed (команда упала) | unknown (агента нет)."""
+
+
+async def update(agent: str) -> dict:
+    """Обновить CLI агента → {agent, before, after}. Сессии агента вызывающий проверяет сам (server.agent_update)."""
+    if agent not in NPM or not os.path.exists(CLIS.get(agent, "")):
+        raise UpdateError("unknown")
+    before = (await status(agent, fresh=True)).get("version")
+    cli = CLIS[agent]
+    if agent == "claude":
+        cmd = [cli, "update"]
+    else:
+        npm = shutil.which("npm")
+        if not npm or "node_modules" not in os.path.realpath(cli):
+            raise UpdateError("manual")
+        cmd = [npm, "install", "-g", NPM[agent] + "@latest"]
+    code, out = await _run(*cmd, timeout=UPDATE_TIMEOUT)
+    _status.pop(agent, None)
+    after = (await status(agent, fresh=True)).get("version")
+    if code != 0:
+        log.warning("update %s: код %s: %s", agent, code, out[-400:])
+        raise UpdateError("failed")
+    log.info("update %s: %s → %s", agent, before, after)
+    return {"agent": agent, "before": before, "after": after}
+
+
 
 async def status(agent: str, fresh: bool = False) -> dict:
     """{id, name, installed, version, logged_in, account, models, efforts, default_model, default_effort, login}."""

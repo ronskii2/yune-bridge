@@ -1,7 +1,8 @@
 # Yune bridge
 
 The bridge is a small program you run on your own computer (macOS, Linux or Windows) so that you can work with
-**Claude Code**, **Codex** and **Gemini CLI** on that machine from [Yune](https://yune.jp) → *Connections*: start sessions in your
+**Claude Code**, **Codex** and ACP agents (**Gemini CLI**, **OpenCode**, **Cursor**, **GitHub Copilot**, **Qwen Code**,
+**Grok**, **Kiro**, **goose**) on that machine from [Yune](https://yune.jp) → *Connections*: start sessions in your
 projects, watch the agent's replies and steps, answer its questions, send files, talk to it by voice — from the browser
 or your phone.
 
@@ -12,9 +13,11 @@ This repository is the complete source of the bridge that Yune installs and upda
 - **Outgoing connection only.** The bridge opens one WebSocket to Yune (`/api/connections/link`) and keeps it alive.
   It does not listen on any public port: its local HTTP server binds to `127.0.0.1` on a random port and requires a
   random per-run token. Yune sends requests through that WebSocket; the bridge answers them.
-- **Agents are yours.** The bridge drives the `claude`, `codex` and `gemini` CLIs that are already installed and logged
-  in on your machine (Claude Agent SDK, `codex exec --json`, `gemini -o stream-json`). Your subscription, settings and
-  skills are used as is. Logging in to Gemini CLI from Yune sets `security.auth.selectedType` to `oauth-personal` in
+- **Agents are yours.** The bridge drives the agent CLIs that are already installed and logged in on your machine
+  (Claude Agent SDK, `codex exec --json`, and the [Agent Client Protocol](https://agentclientprotocol.com) over stdio
+  for `gemini --acp`, `opencode acp`, `cursor-agent acp`, `copilot --acp` and others). Your subscription, settings and
+  skills are used as is. OpenCode is started with `OPENCODE_CONFIG_CONTENT` asking before edits and shell commands, so
+  that the session's access mode below can decide. Logging in to Gemini CLI from Yune sets `security.auth.selectedType` to `oauth-personal` in
   `~/.gemini/settings.json` only if no auth type is chosen yet.
 - **Pairing.** `python -m claude_bridge.remote pair <site>` shows a one-time code; you enter it in Yune. The machine
   key is stored in `~/.yune-bridge/config.json` (mode 600); Yune keeps only its hash. "Disconnect machine" in Yune
@@ -49,8 +52,8 @@ Each session has an access mode, switchable at any time from the icon under the 
   `codex exec` cannot ask per action.
 - **Read only** — Claude Code may only read and search; Codex runs in the `read-only` sandbox.
 
-Gemini CLI uses its approval modes: Full — `yolo`, Auto — `auto_edit` (edits files, no shell commands), Ask —
-`default` (headless Gemini CLI cannot ask, so only reading and searching run), Read only — `plan`.
+ACP agents ask the bridge before edits and commands (`session/request_permission`); the bridge answers by the access
+mode: Full — allow, Auto — allow edits, ask you for commands and deletions, Ask — ask you, Read only — reject.
 
 Only connect machines and projects you are comfortable an agent working in.
 

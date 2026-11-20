@@ -54,8 +54,8 @@ Codex — со следующего хода (codex_session: песочница 
 гасим: они его дети и умерли бы вместе с ним (19.11.2026: долгий brew upgrade убит молча через 10 минут после хода);
 дольше BG_MAX_SEC — гасим и пишем в ленту, что фоновые команды остановлены. Рестарт моста живые ходы обрывает — сессии остаются, продолжаются тем же resume.
 
-Агент сессии — столбец agent: claude (здесь), codex (codex_session.CodexSession) или gemini
-(gemini_session.GeminiSession) — та же лента событий. «Продолжить
+Агент сессии — столбец agent: claude (здесь), codex (codex_session.CodexSession) или агент по ACP — Gemini CLI,
+OpenCode, Cursor и другие (agents.ACP, acp_session.AcpSession) — та же лента событий. «Продолжить
 в другом агенте» (handoff) — новая сессия в том же проекте с выжимкой прежней: сообщения владельца, итоговые ответы,
 изменённые файлы; выжимка уходит агенту вместе с первым сообщением (столбец intro), в ленте — событие handoff.
 """
@@ -1303,7 +1303,7 @@ def _session_class(row: dict):
     if agent == "codex":
         from .codex_session import CodexSession
         return CodexSession
-    if agent == "gemini":
-        from .gemini_session import GeminiSession
-        return GeminiSession
+    if agent in agents.ACP:
+        from .acp_session import AcpSession
+        return AcpSession
     return Session

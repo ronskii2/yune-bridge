@@ -41,6 +41,13 @@ PREAMBLE = """[Сессия идёт с сайта владельца (разд�
 
 """
 STOP_GRACE = 5
+STOPPED = "Остановлено"
+NO_MODEL = "нет такой модели"
+
+
+def note_next(name: str) -> dict:
+    """Заметка в ленте: со следующего хода — эта модель (общая для Codex, Gemini и агентов ACP)."""
+    return {"kind": "note", "text": f"Дальше: {name}"}
 # Режим доступа → флаги хода. approval_policy never: в exec подтверждать некому — что песочница не пускает, просто не выходит
 ACCESS_ARGS = {
     "full": ["--dangerously-bypass-approvals-and-sandbox"],
@@ -172,7 +179,7 @@ class CodexSession(Session):
                          "turns": 0, "error": not stopped})
 
     def _input(self, text: str, images: list[str]) -> str:
-        """Текст хода в stdin (картинки Codex берёт флагами -i, gemini_session — ссылками @путь в тексте)."""
+        """Текст хода в stdin (картинки Codex берёт флагами -i)."""
         return text
 
     async def _stderr(self, proc) -> None:
@@ -295,7 +302,7 @@ class CodexSession(Session):
                 os.killpg(proc.pid, signal.SIGINT)
         except (OSError, ProcessLookupError):
             return
-        self._event({"kind": "note", "text": "Остановлено"})
+        self._event({"kind": "note", "text": STOPPED})
         try:
             await asyncio.wait_for(proc.wait(), STOP_GRACE)
         except asyncio.TimeoutError:
@@ -319,7 +326,7 @@ class CodexSession(Session):
         changes = {}
         if model and model != self.row["model"]:
             if not agents.valid_model(self.agent_id, model):
-                raise BridgeError("нет такой модели")
+                raise BridgeError(NO_MODEL)
             changes["model"] = model
         if effort and self.has_effort and effort != self.row["effort"]:
             if effort not in agents.EFFORTS:
@@ -331,4 +338,4 @@ class CodexSession(Session):
         name = next((m["name"] for m in agents.models(self.agent_id) if m["id"] == self.row["model"]), self.row["model"])
         if self.has_effort:
             name += ", " + str(self.row["effort"])
-        self._event({"kind": "note", "text": f"Дальше: {name}"})
+        self._event(note_next(name))

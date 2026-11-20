@@ -2,7 +2,7 @@
 
 Каждый агент — свой CLI в домашней папке пользователя (тот же вход, что в терминале): Claude Code — `~/.local/bin/claude`
 (сессии — Claude Agent SDK, sessions.py), Codex — `codex` из npm (сессии — `codex exec --json`, codex_session.py),
-Gemini CLI — `gemini` из npm (сессии — `gemini -o stream-json`, gemini_session.py).
+Gemini CLI, OpenCode, Cursor и другие — по ACP (`gemini --acp`, `opencode acp`…: acp.py, acp_session.py, таблица ACP).
 
 Вход — тем же CLI, что и в терминале, но без терминала: процесс входа идёт в псевдотерминале (pty), мост читает из
 него ссылку (и код устройства у Codex) и отдаёт сайту. Codex ждёт, пока человек введёт код на странице OpenAI, и сам
@@ -55,6 +55,32 @@ GEMINI_CLI = _cli("GEMINI_CLI", "gemini", os.path.join(HOME, ".npm-global/bin/ge
 GEMINI_HOME = os.path.join(HOME, ".gemini")
 GEMINI_CREDS = os.path.join(GEMINI_HOME, "oauth_creds.json")
 STATUS_TTL = 60
+PROBE_TIMEOUT = 40
+
+# Агенты по ACP (acp.py, acp_session.py) — команда запуска как в реестре ACP (cdn.agentclientprotocol.com) и у T3 Code.
+# В списке агентов машины — только установленные (Gemini CLI — всегда: его ставят чаще прочих). login — чем войти в
+# терминале (вход с сайта — пока только у Gemini CLI: Login ниже), paths — где CLI бывает кроме PATH
+ACP = {
+    "gemini": {"name": "Gemini CLI", "bin": "gemini", "args": ["--acp"], "login": "gemini"},
+    # OpenCode сам разрешает себе правки и команды — просим спрашивать: решает мост по режиму сессии (acp_session)
+    "opencode": {"name": "OpenCode", "bin": "opencode", "args": ["acp"], "login": "opencode auth login",
+                 "paths": [".opencode/bin/opencode"],
+                 "env": {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"edit": "ask", "bash": "ask"}})}},
+    "cursor": {"name": "Cursor", "bin": "cursor-agent", "args": ["acp"], "login": "cursor-agent login"},
+    "copilot": {"name": "GitHub Copilot", "bin": "copilot", "args": ["--acp"], "login": "copilot"},
+    "qwen": {"name": "Qwen Code", "bin": "qwen", "args": ["--acp"], "login": "qwen"},
+    "grok": {"name": "Grok", "bin": "grok", "args": ["agent", "stdio"], "login": "grok"},
+    "kiro": {"name": "Kiro", "bin": "kiro-cli", "args": ["acp", "--agent-engine=v3"], "login": "kiro-cli login"},
+    "goose": {"name": "goose", "bin": "goose", "args": ["acp"], "login": "goose configure"},
+}
+
+
+def _acp_cli(agent: str) -> str:
+    spec = ACP[agent]
+    name = spec["bin"]
+    return _cli(f"YUNE_{agent.upper()}_CLI", name, *[os.path.join(HOME, p) for p in spec.get("paths") or []],
+                os.path.join(HOME, ".npm-global/bin", name), os.path.join(HOME, ".local/bin", name),
+                "/opt/homebrew/bin/" + name, "/usr/local/bin/" + name)
 LOGIN_TTL = 15 * 60
 
 CLAUDE_MODELS = {"opus": ("Opus 5.5", "claude-opus-5-5"), "sonnet": ("Sonnet 5.5", "claude-sonnet-5-5"),
@@ -106,17 +132,89 @@ GEMINI_MODELS = [{"id": "default", "name": DEFAULT_NAME, "hint": "auto"},
                  {"id": "flash-lite", "name": "Gemini Flash Lite", "hint": CLAUDE_HINTS["haiku"]}]
 
 
+# Модели агентов ACP — из ответа session/new (проверка входа или сессия): у каждого свой список
+_acp_models: dict[str, list[dict]] = {}
+
+
+def remember_models(agent: str, found: list[dict]) -> None:
+    if found:
+        _acp_models[agent] = found
+
+
 def models(agent: str) -> list[dict]:
     if agent == "codex":
         return codex_models()
-    if agent == "gemini":
+    if agent == "gemini" and not _acp_models.get(agent):
         return [dict(m) for m in GEMINI_MODELS]
+    if agent in ACP:
+        return [{"id": "default", "name": DEFAULT_NAME, "hint": ""}] + [dict(m) for m in _acp_models.get(agent) or []]
     return [{"id": k, "name": v[0], "hint": CLAUDE_HINTS.get(k, "")} for k, v in CLAUDE_MODELS.items()]
 
 
-DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), "gemini": ("default", "high")}
-NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
-CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI}
+DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), **{a: ("default", "high") for a in ACP}}
+NAMES = {"claude": "Claude Code", "codex": "Codex", **{a: spec["name"] for a, spec in ACP.items()}}
+CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI,
+        **{a: _acp_cli(a) for a in ACP if a != "gemini"}}
+ALWAYS_LISTED = ("claude", "codex", "gemini")
+
+
+def acp_argv(agent: str) -> list[str]:
+    return [CLIS[agent], *ACP[agent]["args"]]
+
+
+def acp_auth_method(agent: str, methods: list) -> str | None:
+    """Способ входа для authenticate, когда вход на машине уже есть: Gemini CLI — Google (oauth_creds.json) или ключ
+    GEMINI_API_KEY. Других агентов вход без окна не умеет — None (войти в терминале)."""
+    ids = {str(m.get("id")) for m in methods if isinstance(m, dict)}
+    if agent == "gemini":
+        if os.path.exists(GEMINI_CREDS) and "oauth-personal" in ids:
+            return "oauth-personal"
+        if os.environ.get("GEMINI_API_KEY") and "gemini-api-key" in ids:
+            return "gemini-api-key"
+    return None
+
+
+def acp_env(agent: str) -> dict | None:
+    extra = ACP[agent].get("env")
+    return {**os.environ, **extra} if extra else None
+
+
+_probed: dict[str, tuple[bool, str]] = {}
+
+
+async def acp_probe(agent: str) -> tuple[bool, str]:
+    """Вошёл ли агент ACP: initialize и session/new в домашней папке (без запроса к модели). Ответ session/new —
+    заодно список моделей. Не вошёл — ошибка входа (код -32000 или слова про ключ и вход). Ход сессии тоже обновляет
+    это (note_login), поэтому проверяем только при «Проверить» и после старта моста."""
+    from . import acp
+    proc = acp.AcpProc(acp_argv(agent), HOME, acp_env(agent), lambda m, p: None,
+                       lambda m, p: _no_request())
+    try:
+        await proc.start()
+        await proc.call("initialize", acp.initialize_params(), PROBE_TIMEOUT)
+        result = await proc.call("session/new", {"cwd": HOME, "mcpServers": []}, PROBE_TIMEOUT)
+        remember_models(agent, acp.models_of(result)[0])
+        state = (True, "")
+    except acp.AcpError as e:
+        state = (False, "") if acp.is_auth_error(e) else (False, e.message[:120])
+    except (OSError, asyncio.TimeoutError) as e:
+        state = (False, str(e)[:120])
+    finally:
+        await proc.close()
+    _probed[agent] = state
+    return state
+
+
+async def _no_request() -> dict:
+    from . import acp
+    raise acp.AcpError(-32601, "method not supported")
+
+
+def note_login(agent: str, ok: bool) -> None:
+    """Сессия ACP увидела, вошёл ли агент (session/new прошёл или упал на входе) — запомнить без новой проверки."""
+    if agent in ACP and agent != "gemini":
+        _probed[agent] = (ok, "")
+        _status.pop(agent, None)
 
 
 def _gemini_settings_path() -> str:
@@ -206,6 +304,13 @@ async def status(agent: str, fresh: bool = False) -> dict:
                 data.get("authMethod") or "", data.get("authMethod") or "")
         elif info["installed"] and agent == "gemini":
             info["logged_in"], info["account"] = gemini_login_state()
+        elif info["installed"] and agent in ACP:
+            if fresh or agent not in _probed:
+                await acp_probe(agent)
+            info["logged_in"], info["account"] = _probed.get(agent, (False, ""))
+            if info["account"] and not info["logged_in"]:
+                info["account"] = ""            # текст ошибки проверки — в журнал моста, не в карточку
+
         elif info["installed"]:
             code, out = await _run(cli, "login", "status")
             info["logged_in"] = code == 0 and "logged in" in out.lower() and "not logged" not in out.lower()
@@ -214,18 +319,16 @@ async def status(agent: str, fresh: bool = False) -> dict:
         _status[agent] = (time.monotonic(), info)
         info = dict(info)
     model, effort = DEFAULTS[agent]
-    info.update(models=models(agent), efforts=[] if agent == "gemini" else list(EFFORTS), default_model=model,
+    info.update(models=models(agent), efforts=[] if agent in ACP else list(EFFORTS), default_model=model,
                 default_effort=effort,
                 login=LOGINS[agent].public() if agent in LOGINS else None)
     return info
 
 
 async def listing(fresh: bool = False) -> list[dict]:
+    """Агенты машины: Claude Code, Codex, Gemini CLI — всегда (видно, чего нет), остальные ACP — если установлены."""
     found = list(await asyncio.gather(*(status(a, fresh) for a in NAMES)))
-    # OpenCode — позже: в списке, чтобы было видно, что его нет
-    found.append({"id": "opencode", "name": "OpenCode", "installed": False, "version": None, "logged_in": False,
-                  "account": "", "models": [], "efforts": [], "default_model": None, "default_effort": None, "login": None})
-    return found
+    return [a for a in found if a["id"] in ALWAYS_LISTED or a["installed"]]
 
 
 def machine() -> dict:
@@ -275,10 +378,9 @@ class Login:
         12.11.2026: вход сервера пропал от пробного старта) — без force к вошедшему агенту вход не запускаем."""
         if self.active():
             return self.public()
-        if pty is None:
-            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login",
-                                                                       "gemini": "gemini"}.get(self.agent,
-                                                                                               "codex login --device-auth"))
+        if pty is None or (self.agent in ACP and self.agent != "gemini"):
+            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login", "codex": "codex login --device-auth"}.get(
+                self.agent, (ACP.get(self.agent) or {}).get("login") or self.agent))
         if not force and (await status(self.agent, fresh=True))["logged_in"]:
             raise AgentError("Уже вошли — войти заново можно только с подтверждением: текущий вход сотрётся")
         self.state, self.url, self.code, self.error, self.output = "starting", "", "", "", ""

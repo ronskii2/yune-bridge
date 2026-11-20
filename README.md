@@ -52,6 +52,7 @@ Each session has an access mode, switchable at any time from the icon under the 
   `codex exec` cannot ask per action.
 - **Read only** — Claude Code may only read and search; Codex runs in the `read-only` sandbox.
 
+Pi (`pi --mode rpc`) runs with a small extension that asks the bridge before every non-read tool, the same way.
 ACP agents ask the bridge before edits and commands (`session/request_permission`); the bridge answers by the access
 mode: Full — allow, Auto — allow edits, ask you for commands and deletions, Ask — ask you, Read only — reject.
 

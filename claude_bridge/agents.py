@@ -141,20 +141,32 @@ def remember_models(agent: str, found: list[dict]) -> None:
         _acp_models[agent] = found
 
 
+def remember_pi_models(found: list) -> None:
+    """Модели Pi (get_available_models) → «провайдер/модель»: так их и выбирают (set_model {provider, modelId})."""
+    remember_models("pi", [{"id": f"{m['provider']}/{m['id']}", "name": str(m.get("name") or m["id"]),
+                            "hint": str(m.get("provider") or "")} for m in found
+                           if isinstance(m, dict) and m.get("provider") and m.get("id")])
+
+
 def models(agent: str) -> list[dict]:
     if agent == "codex":
         return codex_models()
     if agent == "gemini" and not _acp_models.get(agent):
         return [dict(m) for m in GEMINI_MODELS]
-    if agent in ACP:
+    if agent in ACP or agent == "pi":
         return [{"id": "default", "name": DEFAULT_NAME, "hint": ""}] + [dict(m) for m in _acp_models.get(agent) or []]
     return [{"id": k, "name": v[0], "hint": CLAUDE_HINTS.get(k, "")} for k, v in CLAUDE_MODELS.items()]
 
 
-DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), **{a: ("default", "high") for a in ACP}}
-NAMES = {"claude": "Claude Code", "codex": "Codex", **{a: spec["name"] for a, spec in ACP.items()}}
+# Pi (pi.dev) — не ACP, свой RPC (pi_session.py); вход — в терминале: `pi`, потом /login
+PI_CLI = _cli("YUNE_PI_CLI", "pi", os.path.join(HOME, ".npm-global/bin/pi"), os.path.join(HOME, ".local/bin/pi"),
+              "/opt/homebrew/bin/pi", "/usr/local/bin/pi")
+DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), **{a: ("default", "high") for a in ACP},
+            "pi": ("default", "high")}
+NAMES = {"claude": "Claude Code", "codex": "Codex", **{a: spec["name"] for a, spec in ACP.items()}, "pi": "Pi"}
 CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI,
-        **{a: _acp_cli(a) for a in ACP if a != "gemini"}}
+        **{a: _acp_cli(a) for a in ACP if a != "gemini"}, "pi": PI_CLI}
+NO_EFFORTS = (*ACP, "pi")           # уровня размышлений в меню у них нет
 ALWAYS_LISTED = ("claude", "codex", "gemini")
 
 
@@ -210,9 +222,45 @@ async def _no_request() -> dict:
     raise acp.AcpError(-32601, "method not supported")
 
 
+async def pi_probe() -> tuple[bool, str]:
+    """Вошёл ли Pi: `pi --mode rpc --no-session`, get_available_models — есть модели с ключом или входом — вошёл."""
+    try:
+        proc = await asyncio.create_subprocess_exec(PI_CLI, "--mode", "rpc", "--no-session", cwd=HOME,
+                                                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024)
+    except OSError as e:
+        return False, str(e)[:120]
+    try:
+        proc.stdin.write(b'{"id":"p1","type":"get_available_models"}\n')
+        await proc.stdin.drain()
+        while True:
+            raw = await asyncio.wait_for(proc.stdout.readline(), PROBE_TIMEOUT)
+            if not raw:
+                break
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if msg.get("id") == "p1":
+                found = (msg.get("data") or {}).get("models") or []
+                remember_pi_models(found)
+                _probed["pi"] = (bool(found), "")
+                return _probed["pi"]
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        await proc.wait()
+    _probed["pi"] = (False, "")
+    return _probed["pi"]
+
+
 def note_login(agent: str, ok: bool) -> None:
-    """Сессия ACP увидела, вошёл ли агент (session/new прошёл или упал на входе) — запомнить без новой проверки."""
-    if agent in ACP and agent != "gemini":
+    """Сессия ACP или Pi увидела, вошёл ли агент (session/new прошёл или упал на входе) — запомнить без новой проверки."""
+    if (agent in ACP and agent != "gemini") or agent == "pi":
         _probed[agent] = (ok, "")
         _status.pop(agent, None)
 
@@ -304,6 +352,10 @@ async def status(agent: str, fresh: bool = False) -> dict:
                 data.get("authMethod") or "", data.get("authMethod") or "")
         elif info["installed"] and agent == "gemini":
             info["logged_in"], info["account"] = gemini_login_state()
+        elif info["installed"] and agent == "pi":
+            if fresh or agent not in _probed:
+                await pi_probe()
+            info["logged_in"], info["account"] = _probed.get(agent, (False, ""))
         elif info["installed"] and agent in ACP:
             if fresh or agent not in _probed:
                 await acp_probe(agent)
@@ -319,7 +371,7 @@ async def status(agent: str, fresh: bool = False) -> dict:
         _status[agent] = (time.monotonic(), info)
         info = dict(info)
     model, effort = DEFAULTS[agent]
-    info.update(models=models(agent), efforts=[] if agent in ACP else list(EFFORTS), default_model=model,
+    info.update(models=models(agent), efforts=[] if agent in NO_EFFORTS else list(EFFORTS), default_model=model,
                 default_effort=effort,
                 login=LOGINS[agent].public() if agent in LOGINS else None)
     return info
@@ -378,8 +430,8 @@ class Login:
         12.11.2026: вход сервера пропал от пробного старта) — без force к вошедшему агенту вход не запускаем."""
         if self.active():
             return self.public()
-        if pty is None or (self.agent in ACP and self.agent != "gemini"):
-            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login", "codex": "codex login --device-auth"}.get(
+        if pty is None or (self.agent in ACP and self.agent != "gemini") or self.agent == "pi":
+            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login", "codex": "codex login --device-auth", "pi": "pi → /login"}.get(
                 self.agent, (ACP.get(self.agent) or {}).get("login") or self.agent))
         if not force and (await status(self.agent, fresh=True))["logged_in"]:
             raise AgentError("Уже вошли — войти заново можно только с подтверждением: текущий вход сотрётся")

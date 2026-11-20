@@ -1306,4 +1306,7 @@ def _session_class(row: dict):
     if agent in agents.ACP:
         from .acp_session import AcpSession
         return AcpSession
+    if agent == "pi":
+        from .pi_session import PiSession
+        return PiSession
     return Session

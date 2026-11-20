@@ -12,6 +12,7 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py);
                                      у Claude — и переключатель автосжатия (auto_compact)
   POST /settings                     {auto_compact: bool} — настройки моста, общие на все сессии
+  GET  /context?project=             стартовый контекст Claude Code в папке: правила, память, скиллы, MCP, база (context.py)
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
@@ -47,8 +48,8 @@ import signal
 
 from aiohttp import web
 
-from . import agents, extension, limits, projects, registry, security
-from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT, DEFAULT_MODEL, device_note
+from . import agents, context, extension, limits, projects, registry, security
+from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT, DEFAULT_MODEL, append_prompt, device_note
 
 log = logging.getLogger("claude_bridge")
 SOCKET = os.path.join(DATA, "run", "bridge.sock")
@@ -104,6 +105,12 @@ def make_app(bridge: Bridge) -> web.Application:
             return _json({"ok": False, "error": "unknown agent"}, 400)
         extra = {"auto_compact": bridge.auto_compact} if agent == "claude" else {}
         return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1"), **extra})
+
+    async def context_get(request):
+        path = request.query.get("project") or ""
+        if not path:
+            return _error("project")
+        return _json({"ok": True, "context": await asyncio.to_thread(context.get, path, append_prompt())})
 
     async def settings_set(request):
         body = await _body(request)
@@ -299,6 +306,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/agents", agent_list)
     r.add_get("/limits", limit_get)
     r.add_post("/settings", settings_set)
+    r.add_get("/context", context_get)
     r.add_get("/security", security_get)
     r.add_get("/registry", registry_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)

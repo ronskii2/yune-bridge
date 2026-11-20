@@ -114,7 +114,7 @@ def make_app(bridge: Bridge) -> web.Application:
         agent = request.query.get("agent") or "claude"
         if agent not in ("claude", "codex"):
             return _json({"ok": False, "error": "unknown agent"}, 400)
-        extra = {"auto_compact": bridge.auto_compact} if agent == "claude" else {}
+        extra = {"auto_compact": bridge.auto_compact, "chrome": bridge.chrome} if agent == "claude" else {}
         return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1"), **extra})
 
     async def context_get(request):
@@ -127,7 +127,10 @@ def make_app(bridge: Bridge) -> web.Application:
         body = await _body(request)
         if "auto_compact" in body:
             bridge.set_setting("auto_compact", "1" if body["auto_compact"] else "0")
-        return _json({"ok": True, "auto_compact": bridge.auto_compact})
+        if "chrome" in body and bool(body["chrome"]) != bridge.chrome:
+            bridge.set_setting("chrome", "1" if body["chrome"] else "0")
+            await bridge.restart_idle()
+        return _json({"ok": True, "auto_compact": bridge.auto_compact, "chrome": bridge.chrome})
 
     async def security_get(request):
         return _json({"ok": True, **await security.get(fresh=request.query.get("fresh") == "1")})

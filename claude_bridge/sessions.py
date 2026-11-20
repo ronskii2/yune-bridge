@@ -168,6 +168,8 @@ APPEND = """
 Показать владельцу файл (скриншот сделанного, картинку, PDF, архив, лог) — тулом mcp__lozhka__send_file: картинки и
 видео он увидит прямо в ленте, остальное — файлом для скачивания. Скриншот страницы — Playwright с хоста.
 Файлы, которые прислал владелец, лежат по путям из сообщения — открывай их Read.
+Отвечай на языке, на котором пишет владелец (пишет по-русски — отвечай по-русски), даже если настройки или правила
+машины велят другой язык.
 """
 
 # Мост на машине пользователя (remote.py): MCP Yune на сайте — {"url": site + "/mcp", "token": "m.<машина>.<ключ машины>"}.
@@ -420,6 +422,9 @@ class Session:
             thinking={"type": "adaptive", "display": "omitted"},
             # строка потока больше 1 МБ (снимок экрана в ответе инструмента) роняла чтение по умолчанию (14.11.2026)
             max_buffer_size=64 * 1024 * 1024,
+            # Claude в Chrome (переключатель машины в окне лимитов, владелец 20.11.2026): без флага сессия Chrome не видит,
+            # даже когда расширение стоит; действует с нового процесса
+            extra_args={"chrome": None} if self.bridge.chrome else {},
             resume=r["claude_id"] or None, stderr=lambda line: log.debug("[%s] %s", self.id, line))
 
     async def _ensure(self) -> None:
@@ -1008,6 +1013,21 @@ class Bridge:
     @property
     def auto_compact(self) -> bool:
         return self.setting("auto_compact") == "1"
+
+    @property
+    def chrome(self) -> bool:
+        return self.setting("chrome") == "1"
+
+    async def restart_idle(self) -> None:
+        """Гасит процессы Claude Code, которые сейчас ничего не делают: следующее сообщение поднимет их с новыми
+        настройками (resume). Идущий ход, ждущий ответа владельца и фоновые команды не трогаем — подхватят настройку,
+        когда процесс погаснет сам (sweep)."""
+        for session in list(self.sessions.values()):
+            if (session.client and session.status == "idle" and not session.pending
+                    and (session.row.get("agent") or "claude") == "claude"
+                    and not await self._bg_commands(session.client)):
+                log.info("[%s] settings changed — closing idle process", session.id)
+                await session.close()
 
     # ── отложенные сообщения ────────────────────────────────────────────────
 

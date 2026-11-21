@@ -14,13 +14,18 @@ NGINX_VERSION).
 - images — запущенные контейнеры Docker, по одному на образ: ОС образа и пакеты в экосистемах OSV (Debian:13,
   Ubuntu:24.04:LTS, Alpine:v3.21, PyPI, npm). Читаем через `docker exec` (cat и find в контейнере): папка Docker
   на хосте закрыта для не-root, а `docker save` пишет на диск весь образ;
-- listeners — сокеты на всех адресах (0.0.0.0, ::, *) или публичном: от Интернета их отделяет только файрвол.
+- listeners — сокеты на всех адресах (0.0.0.0, ::, *) или публичном: от Интернета их отделяет только файрвол;
+- hardening — базовая защита (владелец 21.11.2026): SSH (вход по паролю, root, порты — из sshd_config, как его читает
+  sshd: первое значение главное, Include на месте), защита от подбора (fail2ban, crowdsec), файрвол (ufw, firewalld,
+  nftables; macOS — встроенный; Windows — профили), автообновления безопасности (unattended-upgrades), FileVault,
+  есть ли у машины адрес mesh-VPN (общий диапазон CGNAT, RFC 6598) — тогда SSH можно держать только в ней. Только флаги — ни строк конфигов, ни правил файрвола. Не удалось прочитать — None, не «выключено».
 
 Кэш — CACHE_SEC: сайт спрашивает раз в сутки, ручная «Проверить» — с fresh=1.
 """
 from __future__ import annotations
 
 import asyncio
+import glob
 import ipaddress
 import json
 import os
@@ -49,9 +54,9 @@ async def get(fresh: bool = False) -> dict:
             return _cache[1]
         errors: list[str] = []
         out = {"at": time.time(), "os": _os_info(), "updates": [], "reboot": {"required": False},
-               "images": [], "listeners": [], "runtimes": {}, "errors": errors}
+               "images": [], "listeners": [], "runtimes": {}, "hardening": {}, "errors": errors}
         for key, step in (("updates", _updates), ("reboot", _reboot), ("images", _images),
-                          ("listeners", _listeners), ("runtimes", _runtimes)):
+                          ("listeners", _listeners), ("runtimes", _runtimes), ("hardening", _hardening)):
             try:
                 out[key] = await step()
             except Exception as e:          # один шаг не должен прятать остальные
@@ -371,4 +376,142 @@ async def _runtimes() -> dict:
         code, text = await _run(*cmd, timeout=20)
         if code == 0 and text.strip():
             out[name] = text.strip().lstrip("v").replace("Python ", "")
+    return out
+
+
+# ── базовая защита ───────────────────────────────────────────────────────────
+
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+PS_FIREWALL = "@(Get-NetFirewallProfile | ForEach-Object { [pscustomobject]@{n=$_.Name; e=[bool]$_.Enabled} }) | ConvertTo-Json -Compress"
+
+
+def _sshd(path: str = SSHD_CONFIG) -> dict | None:
+    """Как читает sshd: строки по порядку, Include — на месте, первое значение ключа главное (Port — все), с Match —
+    дальше условное, не читаем. Файл не открылся (права) — то, что ещё не задано, неизвестно (None)."""
+    if not os.path.exists(path):
+        return None
+    seen: dict[str, str] = {}
+    ports: list[int] = []
+    state = {"blind": False, "stop": False}
+
+    def walk(file: str, depth: int) -> None:
+        if state["stop"] or depth > 8:
+            return
+        try:
+            with open(file, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            state["blind"] = True
+            return
+        for raw in lines:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            key, value = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
+            if key == "match":
+                state["stop"] = True
+                return
+            if key == "include":
+                for pat in value.split():
+                    pat = pat if os.path.isabs(pat) else os.path.join(os.path.dirname(SSHD_CONFIG), pat)
+                    for inc in sorted(glob.glob(pat)):
+                        walk(inc, depth + 1)
+                        if state["stop"]:
+                            return
+                continue
+            if key == "port":
+                if value.isdigit():
+                    ports.append(int(value))
+            elif key not in seen:
+                seen[key] = None if state["blind"] else value.lower()
+
+    walk(path, 0)
+
+    def flag(key: str, default: str) -> str | None:
+        if key in seen:
+            return seen[key]
+        return None if state["blind"] else default
+    password = flag("passwordauthentication", "yes")
+    return {"password": None if password is None else password == "yes",
+            "root": flag("permitrootlogin", "prohibit-password"),
+            "ports": sorted(set(ports)) or ([] if state["blind"] else [22])}
+
+
+MESH = ipaddress.IPv4Network((0x64400000, 10))      # RFC 6598 (CGNAT): адреса машин в mesh-VPN
+
+
+async def _mesh_vpn() -> bool:
+    """Есть ли у машины адрес из MESH на каком-нибудь интерфейсе (ip / ifconfig / ipconfig)."""
+    system = platform.system()
+    cmd = (("ip", "-o", "-4", "addr", "show") if system == "Linux" and shutil.which("ip")
+           else ("ipconfig",) if system == "Windows" else ("ifconfig",))
+    code, out = await _run(*cmd, timeout=15)
+    for ip in re.findall(r"(?<![\d.])(100\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![\d.])", out):
+        try:
+            if ipaddress.ip_address(ip) in MESH:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+async def _active(unit: str) -> bool | None:
+    code, out = await _run("systemctl", "is-active", unit, timeout=15)
+    if code == 127:
+        return None
+    return out.strip() == "active"
+
+
+def _apt_auto_updates() -> bool | None:
+    if not shutil.which("apt-get"):
+        return None
+    if not shutil.which("unattended-upgrade") and not os.path.exists("/usr/bin/unattended-upgrade"):
+        return False
+    on = None
+    for path in sorted(glob.glob("/etc/apt/apt.conf.d/*")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.search(r'APT::Periodic::Unattended-Upgrade\s+"(\d+)"', text)
+        if m:
+            on = m.group(1) != "0"          # файлы читаются по порядку, последний выигрывает
+    return bool(on)
+
+
+def _ufw_enabled() -> bool | None:
+    try:
+        with open("/etc/ufw/ufw.conf", encoding="utf-8") as f:
+            return bool(re.search(r"^\s*ENABLED\s*=\s*yes", f.read(), re.M))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
+async def _hardening() -> dict:
+    system = platform.system()
+    out: dict = {"mesh_vpn": await _mesh_vpn()}
+    if system in ("Linux", "Darwin"):
+        out["ssh"] = _sshd()
+    if system == "Linux":
+        f2b, crowdsec = await _active("fail2ban"), await _active("crowdsec")
+        out["bruteforce"] = None if f2b is None and crowdsec is None else bool(f2b or crowdsec)
+        ufw = _ufw_enabled()
+        if ufw:
+            ufw = await _active("ufw") is not False
+        firewalld, nft = await _active("firewalld"), await _active("nftables")
+        known = [v for v in (ufw, firewalld, nft) if v is not None]
+        out["firewall"] = any(known) if known else None
+        out["auto_updates"] = _apt_auto_updates()
+    elif system == "Darwin":
+        code, text = await _run("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate", timeout=15)
+        out["firewall"] = ("enabled" in text.lower() or "state = 1" in text.lower()) if code == 0 and text else None
+        code, text = await _run("fdesetup", "status", timeout=15)
+        out["disk_encryption"] = ("is on" in text.lower()) if code == 0 and text else None
+    elif system == "Windows":
+        profiles = _json_list(await _ps(PS_FIREWALL, timeout=30))
+        out["firewall"] = all(bool(p.get("e")) for p in profiles) if profiles else None
     return out

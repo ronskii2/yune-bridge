@@ -193,8 +193,10 @@ def append_prompt() -> str:  # i18n: model
 
 
 def yune_mcp_server(session_id: str) -> dict:
-    """Сервер MCP Yune для Claude Code: ключ машины."""
-    return {"type": "http", "url": YUNE_MCP["url"], "headers": {"Authorization": f"Bearer {YUNE_MCP['token']}"}}
+    """Сервер MCP Yune для Claude Code: ключ машины и id сессии — сайт по нему знает, какие проекты пользователь
+    открыл агенту в этой сессии (розетка «Проекты»: «нельзя» — не видны)."""
+    return {"type": "http", "url": YUNE_MCP["url"],
+            "headers": {"Authorization": f"Bearer {YUNE_MCP['token']}", "X-Yune-Session": session_id}}
 
 
 # Устройство, с которого владелец начал сессию (сайт берёт из User-Agent): строкой перед первым

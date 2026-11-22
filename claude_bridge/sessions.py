@@ -231,7 +231,9 @@ COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin":
            "access": "TEXT NOT NULL DEFAULT 'full'", "rules": "TEXT",
            # кэш контекста у Anthropic (сайт предлагает сжать, когда он остывает): время последнего запроса хода, срок
            # жизни (подписка — час, ключ API и докупка сверх лимита — 5 минут) и размер контекста в токенах
-           "cache_at": "REAL", "cache_ttl": "INTEGER", "ctx_tokens": "INTEGER"}
+           "cache_at": "REAL", "cache_ttl": "INTEGER", "ctx_tokens": "INTEGER",
+           # «Отложить» на сайте (задачи): автосжатие такую не трогает — владелец к ней пока не вернётся
+           "snoozed": "INTEGER NOT NULL DEFAULT 0"}
 
 
 class BridgeError(Exception):
@@ -798,6 +800,8 @@ class Session:
         if not text and not files:
             raise BridgeError("пустое сообщение")
         self.last_active = time.monotonic()
+        if self.row.get("snoozed"):
+            self.bridge.update(self.id, snoozed=0)          # написал в отложенную — снова в работе
         if not self.row["title"]:
             title = " ".join(text.split())[:70] or files[0]["name"]
             self.bridge.update(self.id, title=title)
@@ -1315,7 +1319,7 @@ class Bridge:
         now = time.time()
         rows = self.db.execute(
             "SELECT id, cache_at FROM sessions WHERE archived = 0 AND agent = 'claude' AND cache_ttl >= 3600 "
-            "AND ctx_tokens >= ? AND cache_at + cache_ttl - ? BETWEEN 0 AND ?",
+            "AND snoozed = 0 AND ctx_tokens >= ? AND cache_at + cache_ttl - ? BETWEEN 0 AND ?",
             (AUTO_COMPACT_MIN_TOKENS, now, AUTO_COMPACT_LEAD_SEC)).fetchall()
         for row in rows:
             if self.auto_compacted.get(row["id"]) == row["cache_at"]:

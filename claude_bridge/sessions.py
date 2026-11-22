@@ -97,9 +97,10 @@ CLI = agents.CLAUDE_CLI
 IDLE_CLOSE_SEC = 10 * 60
 BG_MAX_SEC = 6 * 3600
 # Автосжатие (переключатель «auto_compact», сайт — в окне лимитов): за столько до конца часового кэша подписки простаивающая
-# сессия с контекстом от AUTO_COMPACT_MIN_TOKENS сама делает /compact (порог — как у строки «Сжать» на сайте)
+# сессия с контекстом от AUTO_COMPACT_MIN_TOKENS сама делает /compact. Порог 100k (владелец 22.11.2026): сжатие — лишний
+# вызов с чтением всего контекста, а у 50–70k выжимка с подтянутыми файлами выходит почти того же размера
 AUTO_COMPACT_LEAD_SEC = 5 * 60
-AUTO_COMPACT_MIN_TOKENS = 50000
+AUTO_COMPACT_MIN_TOKENS = 100000
 DELTA_EVERY_SEC = 0.12
 DELTA_FULL_SEC = 3
 TRIM = 4000

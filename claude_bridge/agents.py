@@ -1,8 +1,15 @@
-"""Агенты моста: Claude Code, Codex и Gemini CLI на этой машине — установлен ли, вошёл ли, модели и вход по ссылке.
+"""Агенты моста: Claude Code, Codex и Antigravity на этой машине — установлен ли, вошёл ли, модели и вход по ссылке.
 
 Каждый агент — свой CLI в домашней папке пользователя (тот же вход, что в терминале): Claude Code — `~/.local/bin/claude`
 (сессии — Claude Agent SDK, sessions.py), Codex — `codex` из npm (сессии — `codex exec --json`, codex_session.py),
-Gemini CLI, OpenCode, Cursor и другие — по ACP (`gemini --acp`, `opencode acp`…: acp.py, acp_session.py, таблица ACP).
+Antigravity CLI, Gemini CLI, OpenCode, Cursor и другие — по ACP (`agy acp`, `gemini --acp`, `opencode acp`…: acp.py,
+acp_session.py, таблица ACP).
+
+Antigravity CLI (`agy`, Google) — преемник Gemini CLI (с 18.06.2026 Gemini CLI личным аккаунтам Google не служит, остался
+только у Gemini Code Assist для компаний): в списке машины всегда он, Gemini CLI — только если установлен. Вход —
+`agy acp --login` в pty: печатает ссылку Google и ждёт код со страницы (вставляют на сайте), после входа выходит сам;
+вход хранится в связке ключей системы (без неё — в файле), поэтому «вошёл ли» — проверкой ACP (session/new), как у
+прочих ACP. Обновление — `agy update`.
 
 Вход — тем же CLI, что и в терминале, но без терминала: процесс входа идёт в псевдотерминале (pty), мост читает из
 него ссылку (и код устройства у Codex) и отдаёт сайту. Codex ждёт, пока человек введёт код на странице OpenAI, и сам
@@ -58,9 +65,11 @@ STATUS_TTL = 60
 PROBE_TIMEOUT = 40
 
 # Агенты по ACP (acp.py, acp_session.py) — команда запуска как в реестре ACP (cdn.agentclientprotocol.com) и у T3 Code.
-# В списке агентов машины — только установленные (Gemini CLI — всегда: его ставят чаще прочих). login — чем войти в
-# терминале (вход с сайта — пока только у Gemini CLI: Login ниже), paths — где CLI бывает кроме PATH
+# В списке агентов машины — только установленные (Antigravity — всегда). login — чем войти в терминале (вход с сайта —
+# у Antigravity и Gemini CLI: Login ниже), paths — где CLI бывает кроме PATH (от домашней папки)
 ACP = {
+    "antigravity": {"name": "Antigravity", "bin": "agy", "args": ["acp"], "login": "agy acp --login",
+                    "paths": [".local/bin/agy", "AppData/Local/agy/bin/agy.exe"]},
     "gemini": {"name": "Gemini CLI", "bin": "gemini", "args": ["--acp"], "login": "gemini"},
     # OpenCode сам разрешает себе правки и команды — просим спрашивать: решает мост по режиму сессии (acp_session)
     "opencode": {"name": "OpenCode", "bin": "opencode", "args": ["acp"], "login": "opencode auth login",
@@ -167,7 +176,8 @@ NAMES = {"claude": "Claude Code", "codex": "Codex", **{a: spec["name"] for a, sp
 CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI,
         **{a: _acp_cli(a) for a in ACP if a != "gemini"}, "pi": PI_CLI}
 NO_EFFORTS = (*ACP, "pi")           # уровня размышлений в меню у них нет
-ALWAYS_LISTED = ("claude", "codex", "gemini")
+ALWAYS_LISTED = ("claude", "codex", "antigravity")
+SITE_LOGIN = ("claude", "codex", "gemini", "antigravity")      # вход с сайта (Login); остальные — в терминале
 
 
 def acp_argv(agent: str) -> list[str]:
@@ -178,6 +188,9 @@ def acp_auth_method(agent: str, methods: list) -> str | None:
     """Способ входа для authenticate, когда вход на машине уже есть: Gemini CLI — Google (oauth_creds.json) или ключ
     GEMINI_API_KEY. Других агентов вход без окна не умеет — None (войти в терминале)."""
     ids = {str(m.get("id")) for m in methods if isinstance(m, dict)}
+    if agent == "antigravity":
+        # вход Google agy берёт сам из связки ключей; authenticate oauth-personal без входа открыл бы браузер на машине
+        return "gemini-api-key" if os.environ.get("GEMINI_API_KEY") and "gemini-api-key" in ids else None
     if agent == "gemini":
         if os.path.exists(GEMINI_CREDS) and "oauth-personal" in ids:
             return "oauth-personal"
@@ -331,6 +344,7 @@ _status: dict[str, tuple[float, dict]] = {}
 # (`claude update`); агенты из npm — `npm install -g <пакет>@latest`, если стоят через npm (иначе — руками, как ставили).
 # Пакет npm — и для сверки с последней версией на сайте (тот же список)
 NPM = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "gemini": "@google/gemini-cli"}
+SELF_UPDATE = ("claude", "antigravity")      # обновляют себя сами: `claude update`, `agy update`
 UPDATE_TIMEOUT = 600
 
 
@@ -340,11 +354,11 @@ class UpdateError(Exception):
 
 async def update(agent: str) -> dict:
     """Обновить CLI агента → {agent, before, after}. Сессии агента вызывающий проверяет сам (server.agent_update)."""
-    if agent not in NPM or not os.path.exists(CLIS.get(agent, "")):
+    if agent not in (*NPM, *SELF_UPDATE) or not os.path.exists(CLIS.get(agent, "")):
         raise UpdateError("unknown")
     before = (await status(agent, fresh=True)).get("version")
     cli = CLIS[agent]
-    if agent == "claude":
+    if agent in SELF_UPDATE:
         cmd = [cli, "update"]
     else:
         npm = shutil.which("npm")
@@ -412,7 +426,7 @@ async def status(agent: str, fresh: bool = False) -> dict:
 
 
 async def listing(fresh: bool = False) -> list[dict]:
-    """Агенты машины: Claude Code, Codex, Gemini CLI — всегда (видно, чего нет), остальные ACP — если установлены."""
+    """Агенты машины: Claude Code, Codex, Antigravity — всегда (видно, чего нет), остальные ACP — если установлены."""
     found = list(await asyncio.gather(*(status(a, fresh) for a in NAMES)))
     return [a for a in found if a["id"] in ALWAYS_LISTED or a["installed"]]
 
@@ -464,17 +478,21 @@ class Login:
         12.11.2026: вход сервера пропал от пробного старта) — без force к вошедшему агенту вход не запускаем."""
         if self.active():
             return self.public()
-        if pty is None or (self.agent in ACP and self.agent != "gemini") or self.agent == "pi":
+        if pty is None or self.agent not in SITE_LOGIN:
             raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login", "codex": "codex login --device-auth", "pi": "pi → /login"}.get(
                 self.agent, (ACP.get(self.agent) or {}).get("login") or self.agent))
         if not force and (await status(self.agent, fresh=True))["logged_in"]:
             raise AgentError("Уже вошли — войти заново можно только с подтверждением: текущий вход сотрётся")
         self.state, self.url, self.code, self.error, self.output = "starting", "", "", "", ""
-        self.needs_code = self.agent in ("claude", "gemini")
+        self.needs_code = self.agent in ("claude", "gemini", "antigravity")
         self.started = time.time()
         env = dict(os.environ, BROWSER="/bin/false", NO_COLOR="1", TERM="dumb")
         if self.agent == "claude":
             argv = [CLAUDE_CLI, "auth", "login", "--claudeai"]
+        elif self.agent == "antigravity":
+            # agy acp --login: ссылка Google → код со страницы → вход в связку ключей и выход (проверено 1.5.14)
+            argv = [CLIS["antigravity"], "acp", "--login"]
+            env.update(TERM="xterm-256color")
         elif self.agent == "gemini":
             try:
                 gemini_prepare_login()
@@ -490,7 +508,7 @@ class Login:
         else:
             argv = [CODEX_CLI, "login", "--device-auth"]
         master, slave = pty.openpty()
-        if self.agent == "gemini":
+        if self.agent in ("gemini", "antigravity"):
             import fcntl
             import struct
             import termios
@@ -612,7 +630,7 @@ class Login:
             if re.search(r"(?i)login successful|logged in", ANSI.sub("", raw[-500:])):
                 self.state = "code_sent"
             return
-        if self.agent == "gemini":
+        if self.agent in ("gemini", "antigravity"):
             m = re.search(r"https://accounts\.google\.com/o/oauth2/[^\s\x07\x1b]+", ANSI.sub("", self.output))
             if m and not self.url:
                 self.url = m.group(0)
@@ -631,9 +649,9 @@ class Login:
             self.state = "waiting"
 
     def send_code(self, code: str) -> dict:
-        """Claude Code и Gemini CLI: код со страницы входа → в pty процесса входа."""
+        """Claude Code, Gemini CLI и Antigravity: код со страницы входа → в pty процесса входа."""
         code = code.strip()
-        if self.agent not in ("claude", "gemini") or self.state != "waiting":
+        if self.agent not in ("claude", "gemini", "antigravity") or self.state != "waiting":
             raise AgentError("Этот вход кода не ждёт")
         if not code or len(code) > 400 or any(ch in code for ch in "\r\n"):
             raise AgentError("Вставьте код со страницы входа")

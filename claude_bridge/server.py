@@ -1,4 +1,4 @@
-"""HTTP моста: сайт → сессии Claude Code, Codex и Gemini CLI на этой машине.
+"""HTTP моста: сайт → сессии Claude Code, Codex, Antigravity и других агентов на этой машине.
 
 Два способа: на ПК (remote.py) — make_app на 127.0.0.1 со случайным портом и токеном, сайт ходит через исходящий
 WebSocket моста; на машине, где работает сам сайт, — `python -m claude_bridge.server`, unix-сокет DATA/run/bridge.sock

@@ -1,6 +1,6 @@
 """Клиент ACP (Agent Client Protocol, agentclientprotocol.com): JSON-RPC 2.0 построчно через stdin/stdout процесса агента.
 
-Так говорят Gemini CLI (`gemini --acp`), OpenCode (`opencode acp`), Cursor (`cursor-agent acp`), GitHub Copilot
+Так говорят Antigravity CLI (`agy acp`), Gemini CLI (`gemini --acp`), OpenCode (`opencode acp`), Cursor (`cursor-agent acp`), GitHub Copilot
 (`copilot --acp`), Qwen Code (`qwen --acp`), Grok (`grok agent stdio`), Kiro (`kiro-cli acp`), goose (`goose acp`) —
 один клиент на всех (agents.ACP — команды, acp_session.py — сессия моста). Подсмотрено у T3 Code (provider-acp, 20.11.2026).
 

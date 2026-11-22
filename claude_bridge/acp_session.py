@@ -1,4 +1,4 @@
-"""Сессия агента по ACP (acp.py): Gemini CLI, OpenCode, Cursor, GitHub Copilot, Qwen Code, Grok, Kiro, goose — один код.
+"""Сессия агента по ACP (acp.py): Antigravity, Gemini CLI, OpenCode, Cursor, GitHub Copilot, Qwen Code, Grok, Kiro, goose — один код.
 
 Процесс агента живёт, пока сессия жива (гаснет по sweep после IDLE_CLOSE_SEC тишины, как Claude Code); следующее
 сообщение поднимает его снова и продолжает session/load по id (столбец claude_id), если агент умеет loadSession, —

@@ -317,6 +317,7 @@ class Session:
         self.outbox: list[dict] = bridge.outbox(self.id)    # отложенные сообщения: ждут конца хода
         self.stopped = False                # «Стоп» — очередь ждёт владельца, а не уходит сама
         self.turn_failed = False            # ход упал (ошибка, лимит) — очередь тоже ждёт
+        self.compacted = False              # в ходе было сжатие контекста (compact_boundary)
         self.auto_resume = False            # ход запущен автопродолжением: снова лимит — ждём следующего окна
         self.limit_reset: float | None = None
         self.access_told: str | None = None     # режим доступа, о котором агент уже знает в этом процессе моста
@@ -335,6 +336,8 @@ class Session:
                 "agent": r.get("agent") or "claude", "origin": r.get("origin"),
                 "created": r["created"], "updated": r["updated"], "context": r["context"], "cost": r["cost"],
                 "cache_at": r.get("cache_at"), "cache_ttl": r.get("cache_ttl"), "ctx_tokens": r.get("ctx_tokens"),
+                # автосжатие моста включено — сайт не зовёт «Сжать» руками
+                "auto_compact": self.bridge.auto_compact if (r.get("agent") or "claude") == "claude" else None,
                 "status": self.status, "live": bool(self.client),
                 "pending": [{"rid": rid, "kind": kind} for rid, (kind, _f) in self.pending.items()],
                 "queue": [{"qid": q["qid"], "ts": q["ts"], "text": q["text"], "files": q.get("files_info") or [],
@@ -542,21 +545,31 @@ class Session:
                 if claude_id and claude_id != self.row["claude_id"]:
                     self.bridge.update(self.id, claude_id=claude_id)
             elif msg.subtype == "compact_boundary":
-                self._event({"kind": "note", "text": "Контекст сжат"})
+                self.compacted = True
+                self._event({"kind": "note", "code": "compacted", "text": "Контекст сжат"})   # text — старым сайтам
             return
         if isinstance(msg, ResultMessage):
             self.live = ""
             if msg.session_id and msg.session_id != self.row["claude_id"]:
                 self.bridge.update(self.id, claude_id=msg.session_id)
             cost = msg.total_cost_usd or 0.0
-            self.bridge.update(self.id, cost=(self.row["cost"] or 0) + cost, **_cache_fields(msg.usage, self.row))
+            # ход из одного /compact (0 шагов): Claude Code ещё отдаёт размер и кэш прежнего контекста — сайт снова звал
+            # «Сжать 66k», автосжатие ждало старый срок. Сжатого ещё нет ни в кэше, ни в замере — до следующего хода пусто.
+            # Сжатие посреди хода (контекст кончился) — после него были запросы, замер верный
+            compacted = self.compacted and not msg.num_turns
+            self.compacted = False
+            cache = {"cache_at": None, "context": None, "ctx_tokens": None} if compacted else _cache_fields(msg.usage, self.row)
+            self.bridge.update(self.id, cost=(self.row["cost"] or 0) + cost, **cache)
             reason = getattr(msg, "terminal_reason", None) or ""
             self._event({"kind": "result", "cost": cost, "ms": msg.duration_ms, "turns": msg.num_turns,
                          "error": bool(msg.is_error), "errors": (msg.errors or [])[:5],
                          "status": getattr(msg, "api_error_status", None),
                          "stopped": reason.startswith("aborted") or None})
             self._set_status("idle")
-            asyncio.create_task(self._context())
+            if compacted:
+                self._live({"kind": "context", "percent": None, "total": None})
+            else:
+                asyncio.create_task(self._context())
             asyncio.create_task(self._after_turn())
 
     # ── лимит подписки и ошибки API ────────────────────────────────────────

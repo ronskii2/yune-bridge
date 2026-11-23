@@ -211,7 +211,7 @@ class CodexSession(Session):
             if used:
                 window = agents.codex_context_window()
                 percent = round(min(100.0, used * 100 / window), 1)
-                self.bridge.update(self.id, context=percent)
+                self.bridge.update(self.id, context=percent, ctx_tokens=used)   # токены — для окошка сессии после перезагрузки
                 self._live({"kind": "context", "percent": percent, "total": used, "max": window})
             return True
         if kind == "turn.failed":

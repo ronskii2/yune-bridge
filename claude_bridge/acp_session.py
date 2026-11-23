@@ -233,7 +233,7 @@ class AcpSession(Session):
             used, size = int(u.get("used") or 0), int(u.get("size") or 0)
             if used and size:
                 percent = round(min(100.0, used * 100 / size), 1)
-                self.bridge.update(self.id, context=percent)
+                self.bridge.update(self.id, context=percent, ctx_tokens=used)   # токены — для окошка сессии после перезагрузки
                 self._live({"kind": "context", "percent": percent, "total": used, "max": size})
 
     def _delta(self, chunk: str) -> None:

@@ -251,6 +251,18 @@ def make_app(bridge: Bridge) -> web.Application:
                     return _error("decision — allow | deny | all")
                 said = " ".join(str(body.get("text") or "").split())[:2000] if decision == "deny" else ""
                 session.resolve(str(body.get("rid")), "permission", {"decision": decision, "text": said})
+            elif name == "background":         # фоновые команды Claude этой сессии — строка «В фоне» на сайте
+                from .sessions import bg_list
+                return _json({"ok": True, "items": await bg_list(session.client) if session.client else []})
+            elif name == "bgstop":
+                from .sessions import bg_kill
+                try:
+                    pid = int(body.get("pid"))
+                except (TypeError, ValueError):
+                    return _error("pid — число")  # i18n: internal
+                if not session.client or not await bg_kill(session.client, pid):
+                    return _error("такой фоновой команды у сессии нет")  # i18n: internal
+                session._event({"kind": "note", "code": "bg_killed", "text": str(body.get("cmd") or "")[:200]})
             elif name == "stop":
                 await session.stop()
             elif name == "compact":

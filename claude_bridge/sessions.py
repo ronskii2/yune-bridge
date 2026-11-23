@@ -68,6 +68,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import time
 import uuid
@@ -249,6 +250,65 @@ def _cache_fields(usage: dict | None, row: dict) -> dict:
         return {}
     ttl = 3600 if made.get("ephemeral_1h_input_tokens") else 300 if made.get("ephemeral_5m_input_tokens") else row.get("cache_ttl")
     return {"cache_at": time.time(), "cache_ttl": ttl}
+
+
+async def _ps() -> list[tuple[int, int, int, str]]:
+    """(pid, ppid, секунд с запуска, команда) всех процессов; нет ps — пусто."""
+    try:
+        proc = await asyncio.create_subprocess_exec("ps", "-A", "-o", "pid=,ppid=,etimes=,args=",
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), 10)
+    except (OSError, asyncio.TimeoutError):
+        return []
+    rows = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+    return rows
+
+
+def _bg_text(args: str) -> str:
+    """Сама команда из обёртки Bash Claude Code: «source …/shell-snapshots/… && eval '<команда>' \\< /dev/null && pwd …»."""
+    m = re.search(r"eval '(.*)' \\?< /dev/null", args, re.S)
+    text = m.group(1).replace("'\"'\"'", "'").replace("'\\''", "'") if m else args
+    return " ".join(text.split())[:400]
+
+
+async def bg_list(client) -> list[dict]:
+    """Фоновые команды процесса Claude (Bash run_in_background, Monitor): каждую инструмент запускает обёрткой
+    «source ~/.claude/shell-snapshots/… && eval …» — прямой ребёнок CLI с этой строкой и есть команда (серверы MCP —
+    без неё). Сайт показывает их строкой «В фоне» и может остановить (bg_kill)."""
+    pid = getattr(getattr(getattr(client, "_transport", None), "_process", None), "pid", None)
+    if not pid or os.name == "nt":
+        return []
+    return [{"pid": p, "secs": secs, "cmd": _bg_text(args)} for p, ppid, secs, args in await _ps()
+            if ppid == pid and "shell-snapshots" in args]
+
+
+async def bg_kill(client, pid: int) -> bool:
+    """Остановить фоновую команду: она и всё, что она запустила (дети — раньше), SIGTERM, через 3 с — SIGKILL. Только
+    команды этого процесса Claude (bg_list), не любой pid."""
+    if pid not in {b["pid"] for b in await bg_list(client)}:
+        return False
+    rows = await _ps()
+    kids: dict[int, list[int]] = {}
+    for p, ppid, _, _ in rows:
+        kids.setdefault(ppid, []).append(p)
+    tree, stack = [], [pid]
+    while stack:
+        cur = stack.pop()
+        tree.append(cur)
+        stack.extend(kids.get(cur, []))
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for p in reversed(tree):
+            try:
+                os.kill(p, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if sig == signal.SIGTERM:
+            await asyncio.sleep(3)
+    return True
 
 
 def match_answers(questions: list, answers: dict) -> dict:
@@ -1279,24 +1339,8 @@ class Bridge:
 
     @staticmethod
     async def _bg_commands(client) -> int:
-        """Сколько фоновых команд у процесса Claude: инструмент Bash запускает каждую обёрткой
-        «source ~/.claude/shell-snapshots/… && eval …» — прямой ребёнок CLI с этой строкой и есть команда (серверы MCP —
-        без неё). Windows и неизвестный процесс — 0: там гасим, как раньше."""
-        pid = getattr(getattr(getattr(client, "_transport", None), "_process", None), "pid", None)
-        if not pid or os.name == "nt":
-            return 0
-        try:
-            proc = await asyncio.create_subprocess_exec("ps", "-A", "-o", "ppid=,args=", stdout=asyncio.subprocess.PIPE,
-                                                        stderr=asyncio.subprocess.DEVNULL)
-            out, _ = await asyncio.wait_for(proc.communicate(), 10)
-        except (OSError, asyncio.TimeoutError):
-            return 0
-        n = 0
-        for line in out.decode("utf-8", "replace").splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2 and parts[0] == str(pid) and "shell-snapshots" in parts[1]:
-                n += 1
-        return n
+        """Сколько фоновых команд у процесса Claude (bg_list). Windows и неизвестный процесс — 0: там гасим, как раньше."""
+        return len(await bg_list(client))
 
     async def sweep(self) -> None:
         """Гасит процессы, которые молчат IDLE_CLOSE_SEC и ничего не ждут; продолжает сессии, ждавшие лимита."""

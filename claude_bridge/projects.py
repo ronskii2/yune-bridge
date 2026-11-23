@@ -11,8 +11,10 @@ NAMES); ничего нет — домашняя папка. Папка без g
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -28,17 +30,21 @@ _folders: tuple[str, ...] = ()
 _save = None          # сохранить отдельные папки (ПК: в config.json моста); нет — выбранная папка живёт до перезапуска
 BROWSE_MAX = 500      # подпапок в одном окне выбора
 
-# Значок проекта (как у T3 Code): favicon, icon, logo, logotype, avatar в корне и обычных папках веб-проектов. Ищем один
-# раз и запоминаем путь (~/.yune-bridge/icons.json): найденный не ищем снова, пока файл на месте; не нашли — ещё раз
-# через неделю (вдруг добавили). Сайт берёт картинку по /projects/icon — в списке проектов только её версия
-ICON_NAMES = ("favicon.svg", "favicon.png", "favicon.ico", "icon.svg", "icon.png", "logo.svg", "logo.png",
-              "logotype.svg", "logotype.png", "logo-mark.svg", "logo.webp", "icon.webp", "avatar.svg", "avatar.png",
-              "apple-touch-icon.png", "logo.jpg", "avatar.jpg", "app-icon.png")
-ICON_DIRS = ("", "public", "static", "assets", "src", "src/assets", "src/app", "src/static", "app", "web", "web/public",
-             "web/static", "frontend/public", "client/public", "site", "www", "docs", "images", "img", "resources",
-             ".github", "brand")
+# Значок проекта (как у T3 Code): favicon, apple-touch-icon, logo, icon, avatar — по всему проекту до глубины ICON_DEPTH
+# (без node_modules, .git, сборок): у веб-проектов он лежит в public/, static/, assets/… Ищем один раз и
+# запоминаем путь (~/.yune-bridge/icons.json): найденный не ищем снова, пока файл на месте; не нашли — ещё раз через
+# неделю. Сайт берёт картинку по /projects/icon — в списке проектов только её версия
+ICON_KINDS = ("favicon", "apple-touch-icon", "logo", "logotype", "icon", "app-icon", "avatar", "logo-mark", "mark")
+ICON_EXT = (".svg", ".png", ".ico", ".webp", ".jpg")
+ICON_RE = re.compile(r"^(" + "|".join(re.escape(k) for k in ICON_KINDS) + r")([-_.@][\w.@-]*)?(" +
+                     "|".join(re.escape(e) for e in ICON_EXT) + r")$", re.I)
+ICON_SKIP = {"node_modules", ".git", ".venv", "venv", "env", "__pycache__", "dist", "build", "out", "target", "vendor",
+             "coverage", "worktrees", ".next", ".nuxt", ".cache", "Pods", "DerivedData", "site-packages", "tmp", "logs"}
+ICON_DEPTH = 4
+ICON_SCAN_MAX = 20000     # записей папок за один поиск (по уровням, мелкие — первыми); большой репозиторий — не дольше
 ICON_MAX = 512 * 1024
 ICON_RETRY_SEC = 7 * 86400
+ICON_CACHE_V = 2          # поменялся способ поиска — прежние «не нашли» ищем заново
 ICON_MIME = {".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".webp": "image/webp",
              ".jpg": "image/jpeg"}
 _icons: dict | None = None
@@ -127,37 +133,49 @@ def _icons_save() -> None:
 
 
 def _icon_find(path: str) -> str:
-    """Первый по ICON_NAMES файл в ICON_DIRS проекта (без учёта регистра) — путь от корня проекта или ""."""
-    found: dict[str, str] = {}
-    for d in ICON_DIRS:
+    """Лучший значок проекта — путь от корня или "". Порядок: вид (favicon, apple-touch-icon, logo…), имя без
+    приставки (logo.svg раньше logo-openai.png — чужие логотипы в статьях), мельче глубина, svg/png раньше ico."""
+    best, best_key, seen = "", None, 0
+    queue = collections.deque([(path, 0)])          # по уровням: у верхних папок значок вероятнее
+    while queue:
+        d, depth = queue.popleft()
         try:
-            entries = os.listdir(os.path.join(path, d))
+            entries = list(os.scandir(d))
         except OSError:
             continue
         for e in entries:
-            low = e.lower()
-            if low in ICON_NAMES and low not in found:
-                full = os.path.join(path, d, e)
-                try:
-                    if os.path.isfile(full) and 0 < os.path.getsize(full) <= ICON_MAX:
-                        found[low] = os.path.join(d, e) if d else e
-                except OSError:
-                    pass
-    return next((found[n] for n in ICON_NAMES if n in found), "")
+            seen += 1
+            if seen > ICON_SCAN_MAX:
+                return best
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if depth < ICON_DEPTH and e.name not in ICON_SKIP and (not e.name.startswith(".") or e.name == ".github"):
+                        queue.append((e.path, depth + 1))
+                    continue
+                m = ICON_RE.match(e.name)
+                if not m or not e.is_file() or not 0 < e.stat().st_size <= ICON_MAX:
+                    continue
+            except OSError:
+                continue
+            rel = os.path.relpath(e.path, path)
+            key = (ICON_KINDS.index(m.group(1).lower()), bool(m.group(2)), depth, ICON_EXT.index(m.group(3).lower()), len(rel), rel)
+            if best_key is None or key < best_key:
+                best, best_key = rel, key
+    return best
 
 
 def icon_file(path: str) -> str:
     """Значок проекта — полный путь к файлу или "" (из памяти; ищем, только если не искали или не нашли неделю назад)."""
     db = _icons_db()
     got = db.get(path)
-    if isinstance(got, dict):
+    if isinstance(got, dict) and got.get("v") == ICON_CACHE_V:
         rel = got.get("file") or ""
         if rel and os.path.isfile(os.path.join(path, rel)):
             return os.path.join(path, rel)
         if not rel and time.time() - float(got.get("at") or 0) < ICON_RETRY_SEC:
             return ""
     rel = _icon_find(path)
-    db[path] = {"file": rel, "at": int(time.time())}
+    db[path] = {"file": rel, "at": int(time.time()), "v": ICON_CACHE_V}
     _icons_save()
     return os.path.join(path, rel) if rel else ""
 

@@ -11,8 +11,10 @@ NAMES); ничего нет — домашняя папка. Папка без g
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import time
 
 from . import extension
 
@@ -25,6 +27,21 @@ _roots: tuple[str, ...] | None = None
 _folders: tuple[str, ...] = ()
 _save = None          # сохранить отдельные папки (ПК: в config.json моста); нет — выбранная папка живёт до перезапуска
 BROWSE_MAX = 500      # подпапок в одном окне выбора
+
+# Значок проекта (как у T3 Code): favicon, icon, logo, logotype, avatar в корне и обычных папках веб-проектов. Ищем один
+# раз и запоминаем путь (~/.yune-bridge/icons.json): найденный не ищем снова, пока файл на месте; не нашли — ещё раз
+# через неделю (вдруг добавили). Сайт берёт картинку по /projects/icon — в списке проектов только её версия
+ICON_NAMES = ("favicon.svg", "favicon.png", "favicon.ico", "icon.svg", "icon.png", "logo.svg", "logo.png",
+              "logotype.svg", "logotype.png", "logo-mark.svg", "logo.webp", "icon.webp", "avatar.svg", "avatar.png",
+              "apple-touch-icon.png", "logo.jpg", "avatar.jpg", "app-icon.png")
+ICON_DIRS = ("", "public", "static", "assets", "src", "src/assets", "src/app", "src/static", "app", "web", "web/public",
+             "web/static", "frontend/public", "client/public", "site", "www", "docs", "images", "img", "resources",
+             ".github", "brand")
+ICON_MAX = 512 * 1024
+ICON_RETRY_SEC = 7 * 86400
+ICON_MIME = {".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".webp": "image/webp",
+             ".jpg": "image/jpeg"}
+_icons: dict | None = None
 
 
 def configure(roots: list[str] | None = None, folders: list[str] | None = None, save=None) -> None:
@@ -81,7 +98,97 @@ def _is_git(path: str) -> bool:
     return os.path.exists(os.path.join(path, ".git"))
 
 
+def _icons_file() -> str:
+    return os.path.join(os.environ.get("CLAUDE_BRIDGE_DATA") or os.path.join(HOME, ".yune-bridge"), "icons.json")
+
+
+def _icons_db() -> dict:
+    global _icons
+    if _icons is None:
+        try:
+            with open(_icons_file(), encoding="utf-8") as f:
+                _icons = json.load(f)
+            if not isinstance(_icons, dict):
+                _icons = {}
+        except (OSError, ValueError):
+            _icons = {}
+    return _icons
+
+
+def _icons_save() -> None:
+    try:
+        os.makedirs(os.path.dirname(_icons_file()), exist_ok=True)
+        tmp = _icons_file() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_icons_db(), f, ensure_ascii=False)
+        os.replace(tmp, _icons_file())
+    except OSError:
+        pass
+
+
+def _icon_find(path: str) -> str:
+    """Первый по ICON_NAMES файл в ICON_DIRS проекта (без учёта регистра) — путь от корня проекта или ""."""
+    found: dict[str, str] = {}
+    for d in ICON_DIRS:
+        try:
+            entries = os.listdir(os.path.join(path, d))
+        except OSError:
+            continue
+        for e in entries:
+            low = e.lower()
+            if low in ICON_NAMES and low not in found:
+                full = os.path.join(path, d, e)
+                try:
+                    if os.path.isfile(full) and 0 < os.path.getsize(full) <= ICON_MAX:
+                        found[low] = os.path.join(d, e) if d else e
+                except OSError:
+                    pass
+    return next((found[n] for n in ICON_NAMES if n in found), "")
+
+
+def icon_file(path: str) -> str:
+    """Значок проекта — полный путь к файлу или "" (из памяти; ищем, только если не искали или не нашли неделю назад)."""
+    db = _icons_db()
+    got = db.get(path)
+    if isinstance(got, dict):
+        rel = got.get("file") or ""
+        if rel and os.path.isfile(os.path.join(path, rel)):
+            return os.path.join(path, rel)
+        if not rel and time.time() - float(got.get("at") or 0) < ICON_RETRY_SEC:
+            return ""
+    rel = _icon_find(path)
+    db[path] = {"file": rel, "at": int(time.time())}
+    _icons_save()
+    return os.path.join(path, rel) if rel else ""
+
+
+def _icon_version(path: str) -> str | None:
+    full = icon_file(path)
+    if not full:
+        return None
+    try:
+        st = os.stat(full)
+    except OSError:
+        return None
+    return f"{int(st.st_mtime)}-{st.st_size}"
+
+
+def icon(project: str) -> tuple[str, str] | None:
+    """Значок проекта из списка (чужой путь не отдаём) → (файл, mime) или None."""
+    if project not in candidates():
+        return None
+    full = icon_file(project)
+    mime = ICON_MIME.get(os.path.splitext(full)[1].lower()) if full else None
+    return (full, mime) if mime else None
+
+
 def _card(path: str) -> dict:
+    card = _card_info(path)
+    card["icon"] = _icon_version(path)
+    return card
+
+
+def _card_info(path: str) -> dict:
     name = names().get(path) or os.path.basename(path.rstrip("/\\")) or path
     if not _is_git(path):                       # папка без git: ни ветки, ни правок — время последней правки
         try:

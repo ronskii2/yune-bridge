@@ -20,3 +20,26 @@ def _ca_bundle() -> None:
 
 
 _ca_bundle()
+
+
+def _steady_malloc() -> None:
+    """glibc на Linux: большие буферы — всегда через mmap и сразу назад системе.
+
+    Файлы сессий идут через туннель целиком (байты → base64 → JSON, remote.py), видео в 20 МБ — около 100 МБ буферов
+    на запрос. Динамический порог mmap glibc после первого такого буфера поднимается до 32 МБ, и следующие ложатся в
+    кучу, которую процесс системе не возвращает: мост на сервере за 4 дня занял 1,25 ГБ при пустых сессиях (23.11.2026).
+    Явный порог выключает его подстройку. Две арены вместо 8 на ядро — потоки to_thread не плодят свои кучи.
+    Не Linux или не glibc (macOS, Windows, musl) — ничего не делаем."""
+    import sys
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallopt(-3, 1024 * 1024)       # M_MMAP_THRESHOLD
+        libc.mallopt(-8, 2)                 # M_ARENA_MAX
+    except (OSError, AttributeError):
+        pass
+
+
+_steady_malloc()

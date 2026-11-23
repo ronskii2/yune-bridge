@@ -56,6 +56,7 @@ from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT
 log = logging.getLogger("claude_bridge")
 SOCKET = os.path.join(DATA, "run", "bridge.sock")
 PING_SEC = 20
+TRIM_KEY = 5000       # ключ ответа — текст вопроса; сверяет с полным текстом sessions.match_answers
 
 
 def _json(data: dict, status: int = 200) -> web.Response:
@@ -238,7 +239,7 @@ def make_app(bridge: Bridge) -> web.Application:
                 if not isinstance(answers, dict):
                     return _error("answers — объект")
                 session.resolve(str(body.get("rid")), "question",
-                                {str(k)[:500]: str(v)[:4000] for k, v in answers.items()})
+                                {str(k)[:TRIM_KEY]: str(v)[:4000] for k, v in answers.items()})
             elif name == "secret":
                 value = None if body.get("cancel") else str(body.get("value") or "")
                 if value is not None and not value.strip():

@@ -251,6 +251,28 @@ def _cache_fields(usage: dict | None, row: dict) -> dict:
     return {"cache_at": time.time(), "cache_ttl": ttl}
 
 
+def match_answers(questions: list, answers: dict) -> dict:
+    """Ответы сайта → ключи-вопросы ровно как у агента: Claude Code сверяет ответ с вопросом по полному тексту, а
+    сайт мог получить его обрезанным (_trim, лимит ключа в server.py) — тогда агент видел «The user did not answer»
+    (23.11.2026: вопрос 567 знаков, ключ ответа обрезан до 500). Свой ключ: точный текст → начало текста → по порядку."""
+    texts = [str((q or {}).get("question") or "") for q in questions if isinstance(q, dict)]
+    out, left = {}, dict(answers or {})
+    for text in texts:
+        if text in left:
+            out[text] = left.pop(text)
+            continue
+        for key in list(left):
+            head = key.split("\n…[ещё ", 1)[0]
+            if head and text.startswith(head):
+                out[text] = left.pop(key)
+                break
+    rest = [t for t in texts if t not in out]
+    for text, key in zip(rest, list(left)):        # что не сошлось по тексту — по порядку вопросов
+        out[text] = left.pop(key)
+    out.update(left)
+    return out
+
+
 def _trim(value, limit: int = TRIM):
     if isinstance(value, str):
         return value if len(value) <= limit else value[:limit] + f"\n…[ещё {len(value) - limit} зн.]"
@@ -722,6 +744,7 @@ class Session:
         answers = await self._wait(rid, "question")
         if answers is None:
             return PermissionResultDeny(message="Владелец остановил ход", interrupt=True)
+        answers = match_answers(inp.get("questions") or [], answers)
         self._event({"kind": "answer", "rid": rid, "answers": answers})
         return PermissionResultAllow(updated_input={**inp, "answers": answers})
 

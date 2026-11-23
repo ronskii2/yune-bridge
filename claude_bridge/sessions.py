@@ -262,7 +262,7 @@ def match_answers(questions: list, answers: dict) -> dict:
             out[text] = left.pop(text)
             continue
         for key in list(left):
-            head = key.split("\n…[ещё ", 1)[0]
+            head = key.split("\n…[ещё ", 1)[0]  # i18n: internal — хвост _trim
             if head and text.startswith(head):
                 out[text] = left.pop(key)
                 break

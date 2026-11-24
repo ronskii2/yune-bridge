@@ -93,7 +93,7 @@ def _acp_cli(agent: str) -> str:
 LOGIN_TTL = 15 * 60
 
 CLAUDE_MODELS = {"opus": ("Opus 5.5", "claude-opus-5-5"), "sonnet": ("Sonnet 5.5", "claude-sonnet-5-5"),
-                 "fable": ("Fable 5.1", "claude-fable-5-1"), "haiku": ("Haiku 5.5", "claude-haiku-5-5")}
+                 "fable": ("Fable 5.2", "claude-fable-5-2"), "haiku": ("Haiku 5.5", "claude-haiku-5-5")}
 DEFAULT_NAME = "По умолчанию"
 API_KEY = "ключ API"
 CLAUDE_HINTS = {"opus": "Самая сильная, по умолчанию", "sonnet": "Быстрее и дешевле", "fable": "Fable",

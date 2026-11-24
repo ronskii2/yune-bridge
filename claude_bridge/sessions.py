@@ -109,9 +109,11 @@ TRIM_RESULT = 6000
 FILES_DIR = os.path.join(DATA, "files")           # файлы сессии: присланные владельцем и показанные Claude
 MAX_FILE = 50 * 1024 * 1024
 
-MODELS = agents.CLAUDE_MODELS
-EFFORTS = agents.EFFORTS
-DEFAULT_MODEL, DEFAULT_EFFORT = agents.DEFAULTS["claude"]
+def _model_arg(model: str | None) -> str | None:
+    """Модель для Claude Code: его пункт default и пустая — не передаём (он берёт свою), остальное — как в его списке."""
+    return model if model and model != "default" else None
+
+
 EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "Delete")
 # Режим доступа сессии: full — без вопросов (по умолчанию), ask — изменяющее с разрешения владельца, read — только чтение
 # auto (владелец 18.11.2026) — режим auto Claude Code: безопасное он выполняет сам, сомнительное — спросит (can_use_tool → карточка)
@@ -497,7 +499,7 @@ class Session:
     def _options(self) -> ClaudeAgentOptions:
         r = self.row
         return ClaudeAgentOptions(
-            cli_path=CLI, cwd=r["cwd"], model=MODELS.get(r["model"], MODELS[DEFAULT_MODEL])[1], effort=r["effort"],
+            cli_path=CLI, cwd=r["cwd"], model=_model_arg(r["model"]), effort=r["effort"] or None,
             permission_mode=self._sdk_mode(), can_use_tool=self._can_use_tool,
             # режим доступа — на каждом вызове инструмента (меняется посреди сессии без перезапуска процесса)
             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool])]},
@@ -523,6 +525,7 @@ class Session:
                 return
             client = ClaudeSDKClient(self._options())
             await client.connect()
+            agents.remember_claude(((await client.get_server_info()) or {}).get("models") or [])
             self.client = client
             self.reader = asyncio.create_task(self._read(client))
             self._live({"kind": "session", "session": self.public()})
@@ -1032,15 +1035,19 @@ class Session:
             self._event({"kind": "note", "text": "Остановлено"})
 
     async def configure(self, model: str | None, effort: str | None) -> None:
+        """Модель и уровень — из списка Claude Code (agents.models). Уровня, которого у новой модели нет, не передаём."""
         changes = {}
         if model and model != self.row["model"]:
-            if model not in MODELS:
+            if not agents.valid_model("claude", model):
                 raise BridgeError("нет такой модели")
             changes["model"] = model
+        target = changes.get("model", self.row["model"])
         if effort and effort != self.row["effort"]:
-            if effort not in EFFORTS:
+            if not agents.valid_effort("claude", target, effort):
                 raise BridgeError("нет такого уровня")
             changes["effort"] = effort
+        elif self.row["effort"] and "model" in changes and not agents.valid_effort("claude", target, self.row["effort"]):
+            changes["effort"] = ""
         if not changes:
             return
         self.bridge.update(self.id, **changes)
@@ -1048,8 +1055,9 @@ class Session:
             if "effort" in changes and self.status == "idle":
                 await self.close()          # effort — параметр запуска: следующий ход поднимет процесс с новым
             elif "model" in changes:
-                await self.client.set_model(MODELS[model][1])
-        self._event({"kind": "note", "text": f"Дальше: {MODELS[self.row['model']][0]}, {self.row['effort']}"})
+                await self.client.set_model(_model_arg(target))
+        name = next((m["name"] for m in agents.models("claude") if m["id"] == self.row["model"]), self.row["model"])
+        self._event({"kind": "note", "text": "Дальше: " + ", ".join(x for x in (name, self.row["effort"]) if x)})
 
 
 class Bridge:
@@ -1190,8 +1198,10 @@ class Bridge:
         agent = agent or "claude"
         if agent not in agents.NAMES:
             raise BridgeError("нет такого агента")
-        model = model if agents.valid_model(agent, model) else agents.DEFAULTS[agent][0]
-        effort = effort if effort in EFFORTS else agents.DEFAULTS[agent][1]
+        base_model, base_effort = agents.defaults(agent)
+        model = model if agents.valid_model(agent, model) else base_model
+        if not agents.valid_effort(agent, model, effort):
+            effort = base_effort if agents.valid_effort(agent, model, base_effort) else ""
         access = access if access in ACCESS else "full"
         rules = agent_rules.clean(rules)
         if rules and agent != "claude":

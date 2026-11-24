@@ -127,7 +127,8 @@ class CodexSession(Session):
         argv += ["--json", *ACCESS_ARGS[self.access], "--skip-git-repo-check"]
         if r["model"] and r["model"] != "default":
             argv += ["-m", r["model"]]
-        argv += ["-c", f'model_reasoning_effort="{r["effort"]}"']
+        if r["effort"]:
+            argv += ["-c", f'model_reasoning_effort="{r["effort"]}"']
         if sessions.YUNE_MCP:          # MCP Yune по адресу сайта: ключ машины — из окружения, не в командной строке
             argv += ["-c", f'mcp_servers.yune.url="{sessions.YUNE_MCP["url"]}"',
                      "-c", 'mcp_servers.yune.bearer_token_env_var="YUNE_MCP_TOKEN"']
@@ -328,14 +329,17 @@ class CodexSession(Session):
             if not agents.valid_model(self.agent_id, model):
                 raise BridgeError(NO_MODEL)
             changes["model"] = model
+        target = changes.get("model", self.row["model"])
         if effort and self.has_effort and effort != self.row["effort"]:
-            if effort not in agents.EFFORTS:
+            if not agents.valid_effort(self.agent_id, target, effort):
                 raise BridgeError("нет такого уровня")
             changes["effort"] = effort
+        elif self.row["effort"] and "model" in changes and not agents.valid_effort(self.agent_id, target, self.row["effort"]):
+            changes["effort"] = ""          # у новой модели такого уровня нет — Codex возьмёт её собственный
         if not changes:
             return
         self.bridge.update(self.id, **changes)
         name = next((m["name"] for m in agents.models(self.agent_id) if m["id"] == self.row["model"]), self.row["model"])
-        if self.has_effort:
+        if self.has_effort and self.row["effort"]:
             name += ", " + str(self.row["effort"])
         self._event(note_next(name))

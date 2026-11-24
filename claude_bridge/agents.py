@@ -92,13 +92,7 @@ def _acp_cli(agent: str) -> str:
                 "/opt/homebrew/bin/" + name, "/usr/local/bin/" + name)
 LOGIN_TTL = 15 * 60
 
-CLAUDE_MODELS = {"opus": ("Opus 5.5", "claude-opus-5-5"), "sonnet": ("Sonnet 5.5", "claude-sonnet-5-5"),
-                 "fable": ("Fable 5.2", "claude-fable-5-2"), "haiku": ("Haiku 5.5", "claude-haiku-5-5")}
-DEFAULT_NAME = "По умолчанию"
 API_KEY = "ключ API"
-CLAUDE_HINTS = {"opus": "Самая сильная, по умолчанию", "sonnet": "Быстрее и дешевле", "fable": "Fable",
-                "haiku": "Самая быстрая"}
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
@@ -115,67 +109,123 @@ def _codex_config() -> dict:
 
 
 def codex_models() -> list[dict]:
-    """Модели Codex: «по умолчанию» (модель из ~/.codex/config.toml) и те, что Codex показывает в своём списке."""
-    default = _codex_config().get("model") or ""
-    out = [{"id": "default", "name": DEFAULT_NAME, "hint": default}]
+    """Модели Codex — как в его списке (~/.codex/models_cache.json, visibility list) с его уровнями; модель из
+    config.toml — первой, если её в списке нет (Codex работает на ней)."""
     try:
         with open(os.path.join(CODEX_HOME, "models_cache.json"), encoding="utf-8") as f:
-            cache = json.load(f)
-    except (OSError, ValueError):
-        cache = {}
-    for m in sorted(cache.get("models") or [], key=lambda m: m.get("priority") or 99):
-        if m.get("visibility") == "list" and m.get("slug"):
-            out.append({"id": m["slug"], "name": m.get("display_name") or m["slug"], "hint": m.get("description") or ""})
+            cache = [m for m in json.load(f).get("models") or [] if isinstance(m, dict) and m.get("slug")]
+    except (OSError, ValueError, AttributeError):
+        cache = []
+
+    def one(m: dict) -> dict:
+        return _model(m["slug"], m.get("display_name"), [lv.get("effort") if isinstance(lv, dict) else lv
+                                                       for lv in m.get("supported_reasoning_levels") or []])
+    out = [one(m) for m in sorted(cache, key=lambda m: m.get("priority") or 99) if m.get("visibility") == "list"]
+    model = str(_codex_config().get("model") or "")
+    if model and not any(x["id"] == model for x in out):
+        out.insert(0, next((one(m) for m in cache if m["slug"] == model), _model(model, model)))
     return out
+
+
+def codex_defaults() -> tuple[str, str]:
+    """Модель и уровень Codex по умолчанию — из его config.toml; уровня там нет — тот, что Codex назначил модели."""
+    cfg = _codex_config()
+    model = str(cfg.get("model") or next((m["id"] for m in codex_models()), ""))
+    effort = str(cfg.get("model_reasoning_effort") or "")
+    if not effort:
+        try:
+            with open(os.path.join(CODEX_HOME, "models_cache.json"), encoding="utf-8") as f:
+                effort = str(next((m.get("default_reasoning_level") for m in json.load(f).get("models") or []
+                                   if isinstance(m, dict) and m.get("slug") == model), "") or "")
+        except (OSError, ValueError, AttributeError):
+            effort = ""
+    return model, effort
 
 
 def codex_context_window() -> int:
     return int(_codex_config().get("model_context_window") or 272000)
 
 
-# Gemini CLI — псевдонимы моделей (-m pro|flash|flash-lite): CLI сам ведёт их на текущие модели, список не устаревает.
-# Подсказки — те же строки, что у Claude (их переводит каталог сайта): у моста нет своих переводов
-GEMINI_MODELS = [{"id": "default", "name": DEFAULT_NAME, "hint": "auto"},
-                 {"id": "pro", "name": "Gemini Pro", "hint": ""},
-                 {"id": "flash", "name": "Gemini Flash", "hint": CLAUDE_HINTS["sonnet"]},
-                 {"id": "flash-lite", "name": "Gemini Flash Lite", "hint": CLAUDE_HINTS["haiku"]}]
+# Модели и уровни размышлений — как их отдаёт сам агент, без своих списков и подсказок (владелец 24.11.2026):
+# Claude Code — ответ initialize (models: value, displayName, supportedEffortLevels), Codex — models_cache.json,
+# агенты ACP — ответ session/new, Pi — get_available_models. Модель — {id, name, efforts}; efforts пуст — уровня нет.
+# Пока агент списка не дал, список пуст и модель не передаём: агент берёт свою.
+_models: dict[str, list[dict]] = {}
+_current: dict[str, str] = {}           # модель, которую агент сам назвал текущей (ACP currentModelId)
 
 
-# Модели агентов ACP — из ответа session/new (проверка входа или сессия): у каждого свой список
-_acp_models: dict[str, list[dict]] = {}
+def _model(mid, name=None, efforts=()) -> dict:
+    return {"id": str(mid), "name": str(name or mid), "efforts": [str(e) for e in efforts or [] if e]}
 
 
-def remember_models(agent: str, found: list[dict]) -> None:
+def remember_models(agent: str, found: list[dict], current: str = "") -> None:
     if found:
-        _acp_models[agent] = found
+        _models[agent] = found
+    if current:
+        _current[agent] = current
+
+
+def remember_claude(found: list) -> None:
+    """models из initialize Claude Code — как есть."""
+    remember_models("claude", [_model(m["value"], m.get("displayName"), m.get("supportedEffortLevels"))
+                               for m in found or [] if isinstance(m, dict) and m.get("value")])
+
+
+async def claude_probe() -> None:
+    """Список моделей Claude Code — из его initialize: процесс поднимается без запроса к модели."""
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    client = ClaudeSDKClient(ClaudeAgentOptions(cli_path=CLAUDE_CLI, cwd=HOME))
+    try:
+        await asyncio.wait_for(client.connect(), PROBE_TIMEOUT)
+        remember_claude(((await client.get_server_info()) or {}).get("models") or [])
+    except Exception as e:  # noqa: BLE001
+        log.info("claude: список моделей: %s", e)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def remember_pi_models(found: list) -> None:
     """Модели Pi (get_available_models) → «провайдер/модель»: так их и выбирают (set_model {provider, modelId})."""
-    remember_models("pi", [{"id": f"{m['provider']}/{m['id']}", "name": str(m.get("name") or m["id"]),
-                            "hint": str(m.get("provider") or "")} for m in found
+    remember_models("pi", [_model(f"{m['provider']}/{m['id']}", m.get("name") or m["id"]) for m in found
                            if isinstance(m, dict) and m.get("provider") and m.get("id")])
 
 
 def models(agent: str) -> list[dict]:
     if agent == "codex":
         return codex_models()
-    if agent == "gemini" and not _acp_models.get(agent):
-        return [dict(m) for m in GEMINI_MODELS]
-    if agent in ACP or agent == "pi":
-        return [{"id": "default", "name": DEFAULT_NAME, "hint": ""}] + [dict(m) for m in _acp_models.get(agent) or []]
-    return [{"id": k, "name": v[0], "hint": CLAUDE_HINTS.get(k, "")} for k, v in CLAUDE_MODELS.items()]
+    return [dict(m) for m in _models.get(agent) or []]
+
+
+def efforts(agent: str, model: str | None) -> list[str]:
+    """Уровни размышлений модели — как их дал агент; нет модели в списке — нет и уровней."""
+    return next((list(m["efforts"]) for m in models(agent) if m["id"] == model), [])
+
+
+def defaults(agent: str) -> tuple[str, str]:
+    """Модель и уровень новой сессии — то, что агент берёт сам: Claude Code — свой пункт default и effortLevel из его
+    settings.json, Codex — config.toml, ACP — текущая модель из session/new. Пусто — не передаём, агент решит сам."""
+    if agent == "codex":
+        return codex_defaults()
+    if agent == "claude":
+        model = "default" if any(m["id"] == "default" for m in models(agent)) else ""
+        try:
+            with open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8") as f:
+                effort = str(json.load(f).get("effortLevel") or "")
+        except (OSError, ValueError, AttributeError):
+            effort = ""
+        return model, effort if effort in efforts(agent, model) else ""
+    return _current.get(agent, ""), ""
 
 
 # Pi (pi.dev) — не ACP, свой RPC (pi_session.py); вход — в терминале: `pi`, потом /login
 PI_CLI = _cli("YUNE_PI_CLI", "pi", os.path.join(HOME, ".npm-global/bin/pi"), os.path.join(HOME, ".local/bin/pi"),
               "/opt/homebrew/bin/pi", "/usr/local/bin/pi")
-DEFAULTS = {"claude": ("opus", "high"), "codex": ("default", "high"), **{a: ("default", "high") for a in ACP},
-            "pi": ("default", "high")}
 NAMES = {"claude": "Claude Code", "codex": "Codex", **{a: spec["name"] for a, spec in ACP.items()}, "pi": "Pi"}
 CLIS = {"claude": CLAUDE_CLI, "codex": CODEX_CLI, "gemini": GEMINI_CLI,
         **{a: _acp_cli(a) for a in ACP if a != "gemini"}, "pi": PI_CLI}
-NO_EFFORTS = (*ACP, "pi")           # уровня размышлений в меню у них нет
 ALWAYS_LISTED = ("claude", "codex", "antigravity")
 SITE_LOGIN = ("claude", "codex", "gemini", "antigravity")      # вход с сайта (Login); остальные — в терминале
 
@@ -218,7 +268,7 @@ async def acp_probe(agent: str) -> tuple[bool, str]:
         await proc.start()
         await proc.call("initialize", acp.initialize_params(), PROBE_TIMEOUT)
         result = await proc.call("session/new", {"cwd": HOME, "mcpServers": []}, PROBE_TIMEOUT)
-        remember_models(agent, acp.models_of(result)[0])
+        remember_models(agent, *acp.models_of(result))
         state = (True, "")
     except acp.AcpError as e:
         state = (False, "") if acp.is_auth_error(e) else (False, e.message[:120])
@@ -324,6 +374,10 @@ def valid_model(agent: str, model: str | None) -> bool:
     return any(m["id"] == model for m in models(agent))
 
 
+def valid_effort(agent: str, model: str | None, effort: str | None) -> bool:
+    return effort in efforts(agent, model)
+
+
 async def _run(*args: str, timeout: float = 15) -> tuple[int, str]:
     try:
         proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
@@ -390,6 +444,8 @@ async def status(agent: str, fresh: bool = False) -> dict:
                 info["installed"] = True
                 info["version"] = (re.search(r"\d+\.\d+\.\d+", out) or [None])[0]
         if info["installed"] and agent == "claude":
+            if fresh or agent not in _models:
+                await claude_probe()
             code, out = await _run(cli, "auth", "status")
             try:
                 data = json.loads(out)
@@ -418,9 +474,9 @@ async def status(agent: str, fresh: bool = False) -> dict:
                                else API_KEY if "api key" in out.lower() else "")
         _status[agent] = (time.monotonic(), info)
         info = dict(info)
-    model, effort = DEFAULTS[agent]
-    info.update(models=models(agent), efforts=[] if agent in NO_EFFORTS else list(EFFORTS), default_model=model,
-                default_effort=effort,
+    model, effort = defaults(agent)
+    levels = efforts(agent, model)
+    info.update(models=models(agent), efforts=levels, default_model=model, default_effort=effort if effort in levels else "",
                 login=LOGINS[agent].public() if agent in LOGINS else None)
     return info
 

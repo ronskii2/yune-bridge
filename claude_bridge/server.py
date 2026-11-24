@@ -51,7 +51,7 @@ import signal
 from aiohttp import web
 
 from . import agents, context, extension, limits, projects, registry, security
-from .sessions import DATA, EFFORTS, MODELS, Bridge, BridgeError, DEFAULT_EFFORT, DEFAULT_MODEL, append_prompt, device_note
+from .sessions import DATA, Bridge, BridgeError, append_prompt, device_note
 
 log = logging.getLogger("claude_bridge")
 SOCKET = os.path.join(DATA, "run", "bridge.sock")
@@ -94,9 +94,11 @@ def make_app(bridge: Bridge) -> web.Application:
 
     async def meta(request):
         extra = extension.attr("meta")
-        return _json({"ok": True, "models": [{"id": k, "name": v[0]} for k, v in MODELS.items()],
-                      "efforts": list(EFFORTS), "default_model": DEFAULT_MODEL, "default_effort": DEFAULT_EFFORT,
-                      "agents": await agents.listing(), "machine": agents.machine(), **(extra() if extra else {})})
+        listing = await agents.listing()
+        claude = next((a for a in listing if a["id"] == "claude"), {})
+        return _json({"ok": True, "models": claude.get("models") or [], "efforts": claude.get("efforts") or [],
+                      "default_model": claude.get("default_model") or "", "default_effort": claude.get("default_effort") or "",
+                      "agents": listing, "machine": agents.machine(), **(extra() if extra else {})})
 
     async def agent_list(request):
         return _json({"ok": True, "agents": await agents.listing(fresh=request.query.get("fresh") == "1"),

@@ -116,7 +116,7 @@ class AcpSession(Session):
         agents.note_login(self.agent, True)
         self.mcp_on = bool(mcp)
         found, current = acp.models_of(result or {})
-        agents.remember_models(self.agent, found)
+        agents.remember_models(self.agent, found, current)
         self.model_option = acp.model_option_id(result or {})
         model = self.row["model"]
         if model and model != "default" and model != current:

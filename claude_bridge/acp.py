@@ -154,22 +154,21 @@ def initialize_params() -> dict:
 
 def models_of(result: dict) -> tuple[list[dict], str]:
     """Модели из ответа session/new | session/load: ACP v1 `models {availableModels, currentModelId}` или
-    configOptions с category model. → ([{id, name, hint}], текущая)."""
+    configOptions с category model. → ([{id, name, efforts}], текущая) — как дал агент."""
     out, current = [], ""
     models = result.get("models") if isinstance(result.get("models"), dict) else None
     if models:
         current = str(models.get("currentModelId") or "")
         for m in models.get("availableModels") or []:
             if isinstance(m, dict) and m.get("modelId"):
-                out.append({"id": str(m["modelId"]), "name": str(m.get("name") or m["modelId"]),
-                            "hint": str(m.get("description") or "")[:120]})
+                out.append({"id": str(m["modelId"]), "name": str(m.get("name") or m["modelId"]), "efforts": []})
     for opt in result.get("configOptions") or []:
         if isinstance(opt, dict) and opt.get("category") == "model" and not out:
             current = str(opt.get("currentValue") or opt.get("value") or current)
             for v in opt.get("options") or []:
                 if isinstance(v, dict) and (v.get("value") or v.get("id")):
                     vid = str(v.get("value") or v.get("id"))
-                    out.append({"id": vid, "name": str(v.get("name") or vid), "hint": str(v.get("description") or "")[:120]})
+                    out.append({"id": vid, "name": str(v.get("name") or vid), "efforts": []})
     return out, current
 
 

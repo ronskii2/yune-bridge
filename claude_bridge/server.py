@@ -169,6 +169,19 @@ def make_app(bridge: Bridge) -> web.Application:
             raise web.HTTPNotFound()
         return web.FileResponse(got[0], headers={"Content-Type": got[1]})
 
+    async def project_icon_set(request):
+        project = request.query.get("path") or ""
+        try:
+            if request.content_type == "application/json":
+                body = await _body(request)
+                ver = await asyncio.to_thread(projects.set_icon, project, set_name=str(body.get("set") or "") or None,
+                                              reset=bool(body.get("reset")))
+            else:
+                ver = await asyncio.to_thread(projects.set_icon, project, data=await request.read())
+        except ValueError as e:
+            return _json({"ok": False, "error": str(e)}, 400)
+        return _json({"ok": True, "icon": ver})
+
     async def dir_list(request):
         try:
             return _json({"ok": True, **await asyncio.to_thread(projects.browse, request.query.get("path"))})
@@ -349,6 +362,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)
     r.add_get("/projects", project_list)
     r.add_get("/projects/icon", project_icon)
+    r.add_post("/projects/icon", project_icon_set)
     r.add_get("/dirs", dir_list)
     r.add_post("/folders", folder_add)
     r.add_get("/sessions", session_list)

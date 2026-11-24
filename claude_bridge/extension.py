@@ -11,6 +11,7 @@
   EXTRA: tuple[str, ...]        проекты сверх найденных (только при папках ROOTS)
   NAMES: dict[str, str]         имена проектов по пути
   HOME_NAME: str                подпись карточки «без проекта» при папках ROOTS
+  VIEWS: dict[str, list[dict]]  виды папки — несколько строк одного проекта: {путь: [{key, name, icon, note}]}
   tools(session) -> list        тулы Claude (SDK MCP, в сервере рядом с send_file)
   READ_TOOLS: tuple[str, ...]   их имена (mcp__lozhka__…), которым не нужно разрешение в режиме «Спрашивать»
   prompt() -> str               дополнение системной подсказки Claude (о том, что дают эти тулы)

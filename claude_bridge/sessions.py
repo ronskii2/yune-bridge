@@ -1198,6 +1198,8 @@ class Bridge:
             raise BridgeError("права агента — только у Claude Code")  # i18n: internal
         if rules:                               # агент знает свои права с первого сообщения
             intro = agent_rules.summary(rules) + (intro or "")
+        if card.get("note"):                    # вид проекта (projects.VIEWS): над какой витриной работаем
+            intro = card["note"].strip() + "\n\n" + (intro or "")
         sid, now = uuid.uuid4().hex[:12], time.time()
         self.db.execute("INSERT INTO sessions (id, project, project_name, cwd, model, effort, created, updated, agent, "
                         "intro, origin, access, rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

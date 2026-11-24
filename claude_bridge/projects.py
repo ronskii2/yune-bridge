@@ -12,6 +12,7 @@ NAMES); ничего нет — домашняя папка. Папка без g
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import os
 import re
@@ -180,30 +181,135 @@ def icon_file(path: str) -> str:
     return os.path.join(path, rel) if rel else ""
 
 
-def _icon_version(path: str) -> str | None:
-    full = icon_file(path)
-    if not full:
+# ── виды проекта и свой значок ───────────────────────────────────────────────────────────────────────────────
+# Вид — та же папка под другим именем (расширение: VIEWS = {путь: [{"key", "name", "icon", "note"}]}): один код,
+# несколько витрин. Каждый вид — своя строка в списке (id «путь#key»), свои сессии и значок; note — первой строкой
+# агенту в начале сессии (над чем работаем). Свой значок (выбрал человек на сайте) — сильнее найденного: картинка
+# (~/.yune-bridge/project-icons/) или значок из набора сайта («i:<имя>» — сайт рисует его сам, по теме)
+SET_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+
+
+def _views() -> dict:
+    return extension.attr("VIEWS") or {}
+
+
+def _split(project: str) -> tuple[str, str]:
+    base, _, key = project.partition("#")
+    return base, key
+
+
+def _view(path: str, key: str) -> dict | None:
+    return next((v for v in _views().get(path) or () if v.get("key") == key), None) if key else None
+
+
+def _known(project: str) -> bool:
+    base, key = _split(project)
+    return base in candidates() and (not key or _view(base, key) is not None)
+
+
+def _icon_source(project: str) -> tuple[str, str]:
+    """Значок проекта (или вида) → ("set", имя) | ("file", полный путь) | ("", "")."""
+    base, key = _split(project)
+    own = _icons_db().get("@" + project)
+    if isinstance(own, dict):
+        if own.get("set"):
+            return "set", own["set"]
+        if own.get("file") and os.path.isfile(own["file"]):
+            return "file", own["file"]
+    view = _view(base, key)
+    if view and view.get("icon") and os.path.isfile(os.path.join(base, view["icon"])):
+        return "file", os.path.join(base, view["icon"])
+    full = icon_file(base)
+    return ("file", full) if full else ("", "")
+
+
+def _icon_version(project: str) -> str | None:
+    kind, value = _icon_source(project)
+    if kind == "set":
+        return "i:" + value
+    if kind != "file":
         return None
     try:
-        st = os.stat(full)
+        st = os.stat(value)
     except OSError:
         return None
     return f"{int(st.st_mtime)}-{st.st_size}"
 
 
 def icon(project: str) -> tuple[str, str] | None:
-    """Значок проекта из списка (чужой путь не отдаём) → (файл, mime) или None."""
-    if project not in candidates():
+    """Картинка-значок проекта из списка (чужой путь не отдаём) → (файл, mime) или None."""
+    if not _known(project):
         return None
-    full = icon_file(project)
-    mime = ICON_MIME.get(os.path.splitext(full)[1].lower()) if full else None
+    kind, full = _icon_source(project)
+    mime = ICON_MIME.get(os.path.splitext(full)[1].lower()) if kind == "file" else None
     return (full, mime) if mime else None
+
+
+def _sniff(data: bytes) -> str | None:
+    head = data[:2048].lstrip().lower()
+    if data.startswith(b"\x89PNG"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:4] == b"\x00\x00\x01\x00":
+        return ".ico"
+    if head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in head):
+        return ".svg"
+    return None
+
+
+def set_icon(project: str, data: bytes | None = None, set_name: str | None = None, reset: bool = False) -> str | None:
+    """Свой значок проекта: картинка (data), значок набора сайта (set_name) или reset — снова найденный. → версия."""
+    if not _known(project):
+        raise ValueError("not_found")
+    db, key = _icons_db(), "@" + project
+    old = db.get(key) if isinstance(db.get(key), dict) else {}
+    store = os.path.join(os.path.dirname(_icons_file()), "project-icons")
+    if reset:
+        db.pop(key, None)
+    elif set_name:
+        if not SET_RE.match(set_name):
+            raise ValueError("bad_icon")
+        db[key] = {"set": set_name}
+    elif data:
+        ext = _sniff(data)
+        if not ext or len(data) > ICON_MAX:
+            raise ValueError("bad_icon")
+        os.makedirs(store, exist_ok=True)
+        name = hashlib.sha1(project.encode()).hexdigest()[:16] + f"-{int(time.time())}{ext}"
+        with open(os.path.join(store, name), "wb") as f:
+            f.write(data)
+        db[key] = {"file": os.path.join(store, name)}
+    else:
+        raise ValueError("bad_icon")
+    was = old.get("file")
+    if was and was != (db.get(key) or {}).get("file") and os.path.dirname(was) == store:
+        try:
+            os.remove(was)
+        except OSError:
+            pass
+    _icons_save()
+    return _icon_version(project)
 
 
 def _card(path: str) -> dict:
     card = _card_info(path)
     card["icon"] = _icon_version(path)
     return card
+
+
+def _cards(path: str) -> list[dict]:
+    """Карточки папки: одна — или по одной на каждый вид (VIEWS)."""
+    views = _views().get(path)
+    if not views:
+        return [_card(path)]
+    info, out = _card_info(path), []
+    for v in views:
+        pid = path + "#" + v["key"]
+        out.append({**info, "id": pid, "name": v.get("name") or info["name"], "view": v["key"], "icon": _icon_version(pid)})
+    return out
 
 
 def _card_info(path: str) -> dict:
@@ -251,7 +357,7 @@ def candidates() -> list[str]:
 
 
 def listing() -> list[dict]:
-    cards = [_card(p) for p in candidates()]
+    cards = [c for p in candidates() for c in _cards(p)]
     cards.sort(key=lambda c: c["when"] or 0, reverse=True)
     return cards + [home_card()]
 
@@ -302,4 +408,11 @@ def resolve(project: str) -> dict | None:
     """id проекта из карточки → карточка; чужой путь не принимаем (только из списка)."""
     if project == "server":
         return home_card()
-    return _card(project) if project in candidates() else None
+    if not _known(project):
+        return None
+    base, key = _split(project)
+    if not key:
+        return _card(base)
+    view = _view(base, key)
+    return {**_card_info(base), "id": project, "name": view.get("name") or os.path.basename(base), "view": key,
+            "note": view.get("note") or "", "icon": _icon_version(project)}

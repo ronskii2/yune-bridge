@@ -53,6 +53,41 @@ from aiohttp import web
 from . import agents, context, extension, limits, projects, registry, security
 from .sessions import DATA, Bridge, BridgeError, append_prompt, device_note
 
+
+async def open_local(cwd: str, path: str, reveal: bool = False) -> None:
+    """Открыть файл или папку из ленты сессии на этой машине — программой по умолчанию (macOS — open, Windows —
+    startfile, Linux — xdg-open); reveal — показать в Finder / Проводнике. Только внутри папки сессии (cwd): путь
+    раскрываем (realpath — без выхода по ссылкам и «..»). Машина без экрана (сервер) — ошибка: открывать некому."""
+    import sys
+    path = path.strip()
+    if not path or len(path) > 4096 or "\0" in path:
+        raise BridgeError("no_path: пустой путь")  # i18n: internal
+    root = os.path.realpath(cwd)
+    full = os.path.realpath(os.path.join(root, os.path.expanduser(path)))
+    if full != root and not full.startswith(root.rstrip(os.sep) + os.sep):
+        raise BridgeError("outside: путь вне папки сессии")  # i18n: internal
+    if not os.path.exists(full):
+        raise BridgeError("missing: такого файла нет")  # i18n: internal
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise BridgeError("no_screen: у этой машины нет экрана")  # i18n: internal
+    if sys.platform == "win32":
+        if reveal:
+            await asyncio.create_subprocess_exec("explorer", "/select," + full)
+        else:
+            os.startfile(full)  # type: ignore[attr-defined]  # noqa: S606
+        return
+    if sys.platform == "darwin":
+        cmd = ["open", "-R", full] if reveal else ["open", full]
+    else:
+        cmd = ["xdg-open", os.path.dirname(full) if reveal and os.path.isfile(full) else full]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), 10)
+    except asyncio.TimeoutError:
+        return                                   # программа открылась и держит процесс — это нормально
+    if proc.returncode:
+        raise BridgeError((err or b"").decode(errors="replace").strip()[:200] or "не открылось")  # i18n: internal
+
 log = logging.getLogger("claude_bridge")
 SOCKET = os.path.join(DATA, "run", "bridge.sock")
 PING_SEC = 20
@@ -322,6 +357,8 @@ def make_app(bridge: Bridge) -> web.Application:
             elif name == "delete":
                 await bridge.delete(session.id)
                 return _json({"ok": True})
+            elif name == "open":               # путь из ленты — открыть на этой машине (как двойной клик в Finder)
+                await open_local(session.row["cwd"], str(body.get("path") or ""), bool(body.get("reveal")))
             elif name == "handoff":
                 fresh = bridge.handoff(session.id, str(body.get("agent") or ""), body.get("model"), body.get("effort"))
                 return _json({"ok": True, "session": fresh.public(), "from": session.public()})

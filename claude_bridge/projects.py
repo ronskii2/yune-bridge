@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 
@@ -362,11 +363,107 @@ def listing() -> list[dict]:
     return cards + [home_card()]
 
 
+ICLOUD = os.path.join(HOME, "Library", "Mobile Documents", "com~apple~CloudDocs")
+FIND_MAX = 12          # папок в ответе поиска по имени
+FIND_SEC = 4.0         # обход без Spotlight — не дольше
+FIND_DEPTH = 5
+
+
+def clean_path(text: str) -> str:
+    """Путь, как его вставляют: в кавычках, «file://…», с «\\ » из Терминала, «iCloud Drive/…» из Finder."""
+    from urllib.parse import unquote
+    p = (text or "").strip().strip("'\"`").strip()
+    if p.startswith("file://"):
+        p = unquote(p[7:])
+        if p.startswith("localhost/"):
+            p = p[9:]
+    if "\\" in p and os.sep == "/":
+        p = re.sub(r"\\(.)", r"\1", p)            # «My\\ Folder» — экранирование оболочки
+    for alias in ("~/iCloud Drive", "iCloud Drive", "~/iCloud"):
+        if (p == alias or p.startswith(alias + "/")) and os.path.isdir(ICLOUD):
+            p = ICLOUD + p[len(alias):]
+            break
+    if len(p) > 1:
+        p = p.rstrip("/")
+    return p
+
+
+def _dir_item(path: str, wanted: list[str]) -> dict:
+    item = {"name": os.path.basename(path), "path": path, "git": _is_git(path)}
+    try:
+        names = set(os.listdir(path))
+    except PermissionError:
+        item["access"] = False                         # macOS: Python моста не дали доступа к этой папке
+        return item
+    except OSError:
+        names = set()
+    item["hit"] = sum(1 for w in wanted if w in names)
+    return item
+
+
+def _spotlight(name: str) -> list[str]:
+    """macOS: Spotlight знает папки и в iCloud Drive, и в «Общих» — без обхода диска."""
+    if not shutil.which("mdfind"):
+        return []
+    q = name.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        out = subprocess.run(["mdfind", "-onlyin", HOME, f'kMDItemFSName == "{q}"c && kMDItemContentType == "public.folder"'],
+                             capture_output=True, text=True, timeout=8).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line for line in out.splitlines() if line and os.path.basename(line).lower() == name.lower()]
+
+
+def _walk(name: str) -> list[str]:
+    """Без Spotlight: обход домашней папки (и iCloud Drive) вглубь до FIND_DEPTH, не дольше FIND_SEC."""
+    found, low, stop = [], name.lower(), time.monotonic() + FIND_SEC
+    roots = [HOME] + ([ICLOUD] if os.path.isdir(ICLOUD) else [])
+    cloud = os.path.join(HOME, "Library", "CloudStorage")      # Google Drive, Dropbox, OneDrive на Маке
+    if os.path.isdir(cloud):
+        roots.append(cloud)
+    queue = collections.deque((r, 0) for r in roots)
+    while queue and time.monotonic() < stop and len(found) < FIND_MAX:
+        base, depth = queue.popleft()
+        try:
+            entries = list(os.scandir(base))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.name.startswith(".") or e.name in SKIP or not e.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if e.name.lower() == low:
+                found.append(e.path)
+            if depth + 1 < FIND_DEPTH:
+                queue.append((e.path, depth + 1))
+    return found
+
+
+def find(name: str, inside: list[str] | None = None) -> list[dict]:
+    """Папка по имени — когда её перетащили на сайт: браузер не отдаёт путь, только имя и что внутри (inside).
+    Совпавшие по содержимому — первыми; без доступа (access: False) — с пометкой, сайт подскажет, что включить."""
+    name = (name or "").strip()
+    if not name or "/" in name or len(name) > 255:
+        return []
+    paths = _spotlight(name) or _walk(name)
+    seen, items = set(), []
+    for p in paths:
+        real = os.path.realpath(p)
+        if real in seen or not os.path.isdir(real):
+            continue
+        seen.add(real)
+        items.append(_dir_item(real, inside or []))
+    items.sort(key=lambda x: (-(x.get("hit") or 0), x["path"].count(os.sep), x["path"]))
+    return items[:FIND_MAX]
+
+
 def browse(path: str | None = None) -> dict:
     """Окно «Другая папка»: подпапки path (по умолчанию — домашняя), без скрытых; git — у репозитория.
     Нет такой папки — ValueError("not_found"), нет доступа (macOS: «Рабочий стол», «Документы» без разрешения) —
     ValueError("no_access")."""
-    path = os.path.realpath(os.path.expanduser(path or HOME))
+    path = os.path.realpath(os.path.expanduser(clean_path(path or "") or HOME))
     if not os.path.isdir(path):
         raise ValueError("not_found")
     try:
@@ -392,7 +489,8 @@ def browse(path: str | None = None) -> dict:
 def add_folder(path: str) -> dict:
     """Выбранная папка — в проекты (отдельные папки, folders): карточка проекта. Домашняя — «вся машина»."""
     global _folders
-    real = os.path.realpath(os.path.expanduser(path or ""))
+    path = clean_path(path or "")
+    real = os.path.realpath(os.path.expanduser(path))
     if not path or not os.path.isdir(real):
         raise ValueError("not_found")
     if real == os.path.realpath(HOME):

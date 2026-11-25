@@ -85,7 +85,7 @@ try:                                 # мост на ПК может стоят�
 except ImportError:  # pragma: no cover
     RateLimitEvent = None
 
-from . import agents, extension, projects
+from . import agents, extension, outside, projects
 from . import rules as agent_rules
 
 warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
@@ -1244,6 +1244,51 @@ class Bridge:
         if last and last.strip():
             answers.append(last.strip())
         return {"messages": mine, "answers": answers, "files": files}
+
+    def outside(self) -> list[dict]:
+        """Сессии Claude Code, начатые не через мост (терминал, VS Code, приложение) и ещё не перенесённые (outside.py)."""
+        known = {r["claude_id"] for r in self.db.execute("SELECT claude_id FROM sessions WHERE claude_id IS NOT NULL")}
+        return outside.listing(known)
+
+    def adopt(self, claude_id: str) -> tuple[Session, dict]:
+        """Перенести сессию из терминала: своя строка с тем же claude_id (продолжение — тем же resume, с полным
+        контекстом Claude), история журнала — событиями ленты, название — ai-title Claude Code или начало первого
+        сообщения (сайт потом придумывает короткое). Уже перенесённая — та же сессия."""
+        row = self.db.execute("SELECT id FROM sessions WHERE claude_id = ?", (claude_id,)).fetchone()
+        path = outside.path_of(claude_id)
+        item = outside.info(path) if path else None
+        if row:
+            return self.get(row["id"]), item or {}
+        if not item:
+            raise BridgeError("нет такой сессии")  # i18n: internal
+        try:
+            card = projects.add_folder(item["cwd"])
+        except ValueError:
+            raise BridgeError("папки этой сессии на машине больше нет") from None  # i18n: internal
+        session = self.create(card["id"], None, None, "claude", origin="terminal")
+        rows = []
+        for ts, ev in outside.events(path):
+            if ev["kind"] == "tool":
+                ev["input"] = _trim(ev["input"])
+            elif ev["kind"] == "tool_result":
+                ev["text"] = _trim(_result_text(ev.pop("content")), TRIM_RESULT)
+            ev = {k: v for k, v in ev.items() if v is not None}
+            rows.append((session.id, ts or time.time(), json.dumps(ev, ensure_ascii=False)))
+        self.db.execute("BEGIN")
+        try:
+            self.db.executemany("INSERT INTO events (session, ts, data) VALUES (?, ?, ?)", rows)
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+        title = item["title"] or item["first"][:70]
+        self.update(session.id, claude_id=claude_id, cwd=item["cwd"], title=title)
+        last = rows[-1][1] if rows else item["updated"]
+        first = rows[0][1] if rows else last
+        self.db.execute("UPDATE sessions SET created = ?, updated = ? WHERE id = ?", (first, last, session.id))
+        session.row.update(created=first, updated=last)
+        self.publish({"session": session.id, "kind": "session", "session": session.public()})
+        return session, item
 
     def handoff(self, sid: str, agent: str, model: str | None = None, effort: str | None = None) -> Session:
         """Продолжить сессию в другом агенте: новая сессия в том же проекте с выжимкой этой."""

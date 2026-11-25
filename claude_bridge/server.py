@@ -198,6 +198,25 @@ def make_app(bridge: Bridge) -> web.Application:
             return _json({"ok": False, "error": str(e)}, 400)
         return _json({"ok": True, "project": card})
 
+    async def dir_find(request):
+        """Папка по имени (перетащили из Finder — браузер отдаёт только имя и что внутри): Spotlight, иначе обход."""
+        body = await _body(request)
+        inside = body.get("inside") if isinstance(body.get("inside"), list) else []
+        found = await asyncio.to_thread(projects.find, str(body.get("name") or ""), [str(x) for x in inside[:60]])
+        return _json({"ok": True, "dirs": found})
+
+    async def outside_list(request):
+        return _json({"ok": True, "sessions": await asyncio.to_thread(bridge.outside)})
+
+    async def outside_adopt(request):
+        body = await _body(request)
+        try:
+            session, item = bridge.adopt(str(body.get("id") or ""))
+        except BridgeError as e:
+            return _error(str(e))
+        return _json({"ok": True, "session": session.public(), "first": item.get("first") or "",
+                      "named": bool(item.get("title"))})
+
     async def session_list(request):
         return _json({"ok": True, "sessions": bridge.listing()})
 
@@ -367,6 +386,9 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_post("/projects/icon", project_icon_set)
     r.add_get("/dirs", dir_list)
     r.add_post("/folders", folder_add)
+    r.add_post("/dirs/find", dir_find)
+    r.add_get("/outside", outside_list)
+    r.add_post("/outside", outside_adopt)
     r.add_get("/sessions", session_list)
     r.add_post("/sessions", session_create)
     r.add_get("/sessions/{id:[0-9a-f]{12}}", session_get)

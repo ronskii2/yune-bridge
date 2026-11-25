@@ -201,20 +201,23 @@ def make_app(bridge: Bridge) -> web.Application:
         return _json({"ok": True, "projects": await asyncio.to_thread(projects.listing)})
 
     async def project_icon(request):
-        got = await asyncio.to_thread(projects.icon, request.query.get("path") or "")
+        got = await asyncio.to_thread(projects.icon, request.query.get("path") or "",
+                                      "dark" if request.query.get("theme") == "dark" else None)
         if not got:
             raise web.HTTPNotFound()
         return web.FileResponse(got[0], headers={"Content-Type": got[1]})
 
     async def project_icon_set(request):
         project = request.query.get("path") or ""
+        theme = "dark" if request.query.get("theme") == "dark" else None      # картинка для тёмной темы
+        mono = request.query.get("mono") == "1"                               # одноцветный SVG — красит сайт
         try:
             if request.content_type == "application/json":
                 body = await _body(request)
                 ver = await asyncio.to_thread(projects.set_icon, project, set_name=str(body.get("set") or "") or None,
-                                              reset=bool(body.get("reset")))
+                                              reset=bool(body.get("reset")), theme=theme)
             else:
-                ver = await asyncio.to_thread(projects.set_icon, project, data=await request.read())
+                ver = await asyncio.to_thread(projects.set_icon, project, data=await request.read(), theme=theme, mono=mono)
         except ValueError as e:
             return _json({"ok": False, "error": str(e)}, 400)
         return _json({"ok": True, "icon": ver})

@@ -224,24 +224,49 @@ def _icon_source(project: str) -> tuple[str, str]:
     return ("file", full) if full else ("", "")
 
 
-def _icon_version(project: str) -> str | None:
-    kind, value = _icon_source(project)
-    if kind == "set":
-        return "i:" + value
-    if kind != "file":
-        return None
+def _own(project: str) -> dict:
+    got = _icons_db().get("@" + project)
+    return got if isinstance(got, dict) else {}
+
+
+def _stamp(path: str) -> str | None:
     try:
-        st = os.stat(value)
+        st = os.stat(path)
     except OSError:
         return None
     return f"{int(st.st_mtime)}-{st.st_size}"
 
 
-def icon(project: str) -> tuple[str, str] | None:
-    """Картинка-значок проекта из списка (чужой путь не отдаём) → (файл, mime) или None."""
+def _icon_version(project: str) -> str | None:
+    """Версия значка для сайта: «i:<имя>» — из набора; «<время>-<размер>» — картинка; к ней «|d<…>» — есть своя для
+    тёмной темы, «|m» — одноцветный SVG (сайт красит его цветом текста — под тему сам)."""
+    kind, value = _icon_source(project)
+    if kind == "set":
+        return "i:" + value
+    if kind != "file":
+        return None
+    ver = _stamp(value)
+    if not ver:
+        return None
+    own = _own(project)
+    dark = own.get("dark")
+    if dark and os.path.isfile(dark):
+        ver += "|d" + (_stamp(dark) or "")
+    if own.get("mono") and value.lower().endswith(".svg"):
+        ver += "|m"
+    return ver
+
+
+def icon(project: str, theme: str | None = None) -> tuple[str, str] | None:
+    """Картинка-значок проекта из списка (чужой путь не отдаём) → (файл, mime) или None; theme=dark — своя картинка
+    для тёмной темы, если её загрузили (иначе общая)."""
     if not _known(project):
         return None
     kind, full = _icon_source(project)
+    if kind == "file" and theme == "dark":
+        dark = _own(project).get("dark")
+        if dark and os.path.isfile(dark):
+            full = dark
     mime = ICON_MIME.get(os.path.splitext(full)[1].lower()) if kind == "file" else None
     return (full, mime) if mime else None
 
@@ -261,15 +286,52 @@ def _sniff(data: bytes) -> str | None:
     return None
 
 
-def set_icon(project: str, data: bytes | None = None, set_name: str | None = None, reset: bool = False) -> str | None:
-    """Свой значок проекта: картинка (data), значок набора сайта (set_name) или reset — снова найденный. → версия."""
+def set_icon(project: str, data: bytes | None = None, set_name: str | None = None, reset: bool = False,
+             theme: str | None = None, mono: bool = False) -> str | None:
+    """Свой значок проекта: картинка (data), значок набора сайта (set_name) или reset — снова найденный. → версия.
+    theme=dark — картинка только для тёмной темы (reset с ним — убрать её); mono — SVG одноцветный: сайт красит его
+    цветом текста, и он сам меняется с темой."""
     if not _known(project):
         raise ValueError("not_found")
     db, key = _icons_db(), "@" + project
     old = db.get(key) if isinstance(db.get(key), dict) else {}
     store = os.path.join(os.path.dirname(_icons_file()), "project-icons")
+    if theme == "dark":
+        cur = dict(old)
+        was_dark = cur.pop("dark", None)
+        if reset and was_dark and cur.get("file") == was_dark:   # она же была и светлой — убираем целиком
+            cur.pop("file", None)
+        if data:
+            ext = _sniff(data)
+            if not ext or len(data) > ICON_MAX:
+                raise ValueError("bad_icon")
+            os.makedirs(store, exist_ok=True)
+            name = hashlib.sha1(project.encode()).hexdigest()[:16] + f"-dark-{int(time.time())}{ext}"
+            with open(os.path.join(store, name), "wb") as f:
+                f.write(data)
+            cur["dark"] = os.path.join(store, name)
+            if not cur.get("file"):                             # своей светлой нет — светлой остаётся найденная,
+                src = _icon_source(project)                     # а нет и её — та же картинка в обеих темах
+                cur["file"] = src[1] if src[0] == "file" else cur["dark"]
+        elif not reset:
+            raise ValueError("bad_icon")
+        cur.pop("set", None)
+        db[key] = cur
+        if was_dark and was_dark != cur.get("dark") and os.path.dirname(was_dark) == store:
+            try:
+                os.remove(was_dark)
+            except OSError:
+                pass
+        _icons_save()
+        return _icon_version(project)
     if reset:
         db.pop(key, None)
+        dark = old.get("dark")
+        if dark and os.path.dirname(dark) == store:            # вместе со своей — и картинка тёмной темы
+            try:
+                os.remove(dark)
+            except OSError:
+                pass
     elif set_name:
         if not SET_RE.match(set_name):
             raise ValueError("bad_icon")
@@ -283,6 +345,10 @@ def set_icon(project: str, data: bytes | None = None, set_name: str | None = Non
         with open(os.path.join(store, name), "wb") as f:
             f.write(data)
         db[key] = {"file": os.path.join(store, name)}
+        if old.get("dark"):                                     # своя для тёмной темы остаётся
+            db[key]["dark"] = old["dark"]
+        if mono and ext == ".svg":
+            db[key]["mono"] = True
     else:
         raise ValueError("bad_icon")
     was = old.get("file")

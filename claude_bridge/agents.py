@@ -148,14 +148,19 @@ def codex_context_window() -> int:
 
 # Модели и уровни размышлений — как их отдаёт сам агент, без своих списков и подсказок (владелец 24.11.2026):
 # Claude Code — ответ initialize (models: value, displayName, supportedEffortLevels), Codex — models_cache.json,
-# агенты ACP — ответ session/new, Pi — get_available_models. Модель — {id, name, efforts}; efforts пуст — уровня нет.
+# агенты ACP — ответ session/new, Pi — get_available_models. Модель — {id, name, efforts[, resolved]}; efforts пуст —
+# уровня нет; resolved (Claude Code resolvedModel) — какая модель на деле стоит за пунктом вроде «Default».
 # Пока агент списка не дал, список пуст и модель не передаём: агент берёт свою.
 _models: dict[str, list[dict]] = {}
 _current: dict[str, str] = {}           # модель, которую агент сам назвал текущей (ACP currentModelId)
 
 
-def _model(mid, name=None, efforts=()) -> dict:
-    return {"id": str(mid), "name": str(name or mid), "efforts": [str(e) for e in efforts or [] if e]}
+def _model(mid, name=None, efforts=(), resolved=None) -> dict:
+    """resolved — модель, на которой агент реально работает под этим пунктом (Claude Code: «default» → claude-opus-…)."""
+    out = {"id": str(mid), "name": str(name or mid), "efforts": [str(e) for e in efforts or [] if e]}
+    if resolved:
+        out["resolved"] = str(resolved)
+    return out
 
 
 def remember_models(agent: str, found: list[dict], current: str = "") -> None:
@@ -167,7 +172,7 @@ def remember_models(agent: str, found: list[dict], current: str = "") -> None:
 
 def remember_claude(found: list) -> None:
     """models из initialize Claude Code — как есть."""
-    remember_models("claude", [_model(m["value"], m.get("displayName"), m.get("supportedEffortLevels"))
+    remember_models("claude", [_model(m["value"], m.get("displayName"), m.get("supportedEffortLevels"), m.get("resolvedModel"))
                                for m in found or [] if isinstance(m, dict) and m.get("value")])
 
 

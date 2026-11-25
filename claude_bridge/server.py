@@ -360,6 +360,15 @@ def make_app(bridge: Bridge) -> web.Application:
             elif name == "delete":
                 await bridge.delete(session.id)
                 return _json({"ok": True})
+            elif name == "export":             # файл с этой машины — сайту (инструмент Yune media_from_machine)
+                path = os.path.expanduser(str(body.get("path") or "").strip())
+                if not path:
+                    return _error("empty path")
+                if not os.path.isabs(path):
+                    path = os.path.join(session.row["cwd"], path)
+                info = await asyncio.to_thread(bridge.store_file, session.id, path)
+                info.pop("path", None)
+                return _json({"ok": True, **info})
             elif name == "open":               # путь из ленты — открыть на этой машине (как двойной клик в Finder)
                 await open_local(session.row["cwd"], str(body.get("path") or ""), bool(body.get("reveal")))
             elif name == "handoff":

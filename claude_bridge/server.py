@@ -12,7 +12,8 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /limits?agent=claude|codex    лимиты подписки агента на машине: окна, проценты, сброс (limits.py);
                                      у Claude — и переключатель автосжатия (auto_compact)
   POST /agents/{agent}/update        обновить CLI агента (claude update / npm -g …@latest); идёт его ход — 409 busy
-  POST /settings                     {auto_compact: bool} — настройки моста, общие на все сессии
+  POST /settings                     {auto_compact: bool, chrome: bool, compact_window: int | "auto"} — настройки моста,
+                                     общие на все сессии; compact_window — порог автосжатия в settings.json Claude Code
   GET  /context?project=             стартовый контекст Claude Code в папке: правила, память, скиллы, MCP, база (context.py)
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
@@ -153,7 +154,8 @@ def make_app(bridge: Bridge) -> web.Application:
         agent = request.query.get("agent") or "claude"
         if agent not in ("claude", "codex"):
             return _json({"ok": False, "error": "unknown agent"}, 400)
-        extra = {"auto_compact": bridge.auto_compact, "chrome": bridge.chrome} if agent == "claude" else {}
+        extra = {"auto_compact": bridge.auto_compact, "chrome": bridge.chrome,
+                 "compact_window": agents.claude_compact_window()} if agent == "claude" else {}
         return _json({"ok": True, "limits": await limits.get(agent, fresh=request.query.get("fresh") == "1"), **extra})
 
     async def context_get(request):
@@ -169,7 +171,13 @@ def make_app(bridge: Bridge) -> web.Application:
         if "chrome" in body and bool(body["chrome"]) != bridge.chrome:
             bridge.set_setting("chrome", "1" if body["chrome"] else "0")
             await bridge.restart_idle()
-        return _json({"ok": True, "auto_compact": bridge.auto_compact, "chrome": bridge.chrome})
+        if "compact_window" in body:            # порог автосжатия Claude Code (его settings.json, autoCompactWindow)
+            try:
+                await asyncio.to_thread(agents.set_claude_compact_window, body["compact_window"])
+            except (ValueError, OSError) as e:
+                return _json({"ok": False, "error": str(e)}, 400)
+        return _json({"ok": True, "auto_compact": bridge.auto_compact, "chrome": bridge.chrome,
+                      "compact_window": agents.claude_compact_window()})
 
     async def security_get(request):
         return _json({"ok": True, **await security.get(fresh=request.query.get("fresh") == "1")})

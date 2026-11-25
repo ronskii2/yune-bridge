@@ -95,6 +95,15 @@ async def _claude() -> dict:
         w = data.get(kind)
         if isinstance(w, dict) and w.get("utilization") is not None:
             windows.append({"type": kind, "used": float(w["utilization"]), "resets_at": _ts(w.get("resets_at")), "span": span})
+    # недельные лимиты отдельной модели (Fable и т. п.) — в списке limits: kind weekly_scoped, имя — scope.model
+    for w in data.get("limits") or []:
+        if not isinstance(w, dict) or w.get("kind") != "weekly_scoped" or w.get("percent") is None:
+            continue
+        model = ((w.get("scope") or {}).get("model") or {}) if isinstance(w.get("scope"), dict) else {}
+        name = str(model.get("display_name") or model.get("id") or "")[:40]
+        if name:
+            windows.append({"type": "scoped", "name": name, "used": float(w["percent"]),
+                            "resets_at": _ts(w.get("resets_at")), "span": 7 * 86400})
     return {"windows": windows, "plan": plan}
 
 

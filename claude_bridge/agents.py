@@ -225,6 +225,50 @@ def defaults(agent: str) -> tuple[str, str]:
     return _current.get(agent, ""), ""
 
 
+# Порог автосжатия Claude Code (владелец 25.11.2026): настройка самого Claude Code autoCompactWindow в его settings.json —
+# сколько токенов контекста, после которых он сам сжимает разговор (не меньше 100 000), или «auto» — подобранный под
+# модель. Та же, что ставит его /autocompact; меняем верхний уровень файла, остальное в нём не трогаем
+COMPACT_MIN = 100000
+
+
+def _claude_settings_path() -> str:
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude"), "settings.json")
+
+
+def claude_compact_window() -> int | str:
+    try:
+        with open(_claude_settings_path(), encoding="utf-8") as f:
+            value = json.load(f).get("autoCompactWindow")
+    except (OSError, ValueError, AttributeError):
+        return "auto"
+    return value if isinstance(value, int) and value >= COMPACT_MIN else "auto"
+
+
+def set_claude_compact_window(value) -> int | str:
+    """value — число токенов (от COMPACT_MIN) или «auto» (ключ убираем: Claude Code берёт свой порог)."""
+    if value != "auto" and not (isinstance(value, int) and COMPACT_MIN <= value <= 10_000_000):
+        raise ValueError("bad window")
+    path = _claude_settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("settings.json is not an object")
+    except FileNotFoundError:
+        data = {}
+    if value == "auto":
+        data.pop("autoCompactWindow", None)
+    else:
+        data["autoCompactWindow"] = value
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".yune.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return claude_compact_window()
+
+
 # Pi (pi.dev) — не ACP, свой RPC (pi_session.py); вход — в терминале: `pi`, потом /login
 PI_CLI = _cli("YUNE_PI_CLI", "pi", os.path.join(HOME, ".npm-global/bin/pi"), os.path.join(HOME, ".local/bin/pi"),
               "/opt/homebrew/bin/pi", "/usr/local/bin/pi")

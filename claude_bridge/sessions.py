@@ -499,6 +499,126 @@ class Session:
 
         return send_file
 
+    # ── другие агенты этой машины (владелец 25.11.2026, как в T3 Code) ─────────────────────────────────────────────
+    # Claude Code поручает задачу Codex, Antigravity (Gemini), OpenCode… — та же машина и тот же проект: мост заводит
+    # отдельную сессию того агента (её видно на сайте своей строкой, с логотипом агента), шлёт ей задание и ждёт конца
+    # хода; ответ агента — результатом инструмента. В ленте Claude Code — карточка со ссылкой на сессию-поручение, в
+    # ней — ссылка обратно. Поручения из поручения не даём (один уровень)
+    def _agent_tools(self) -> list:
+        if str(self.row.get("origin") or "").startswith("sub:"):
+            return []
+        names = ", ".join(f"{a} ({n})" for a, n in agents.NAMES.items())
+        run_schema = {"type": "object", "properties": {
+            "agent": {"type": "string", "enum": list(agents.NAMES), "description": f"Agent on this machine: {names}"},
+            "prompt": {"type": "string", "description": "The task for the agent — self-contained: it does not see this "
+                       "conversation. Same project folder as yours."},
+            "session_id": {"type": "string", "description": "Continue an earlier delegated session (id from a previous "
+                           "agent_run) instead of starting a new one"},
+            "title": {"type": "string", "description": "Short title of the delegated session, in the owner's language"},
+            "model": {"type": "string", "description": "Model id of that agent; empty — its default"},
+            "wait": {"type": "boolean", "description": "Wait for the answer (default true). false — return the session "
+                     "id at once; collect the answer later with agent_result"},
+            "timeout_minutes": {"type": "number", "description": "How long to wait, 1–120 (default 30); still running "
+                                "after that — use agent_result"}},
+            "required": ["prompt"]}
+        result_schema = {"type": "object", "properties": {
+            "session_id": {"type": "string"},
+            "timeout_minutes": {"type": "number", "description": "How long to wait for the current turn, 0–120 (default 10)"}},
+            "required": ["session_id"]}
+
+        def text(t: str, err: bool = False) -> dict:
+            return {"content": [{"type": "text", "text": t}], **({"is_error": True} if err else {})}
+
+        def last_event_id(sid: str) -> int:
+            row = self.bridge.db.execute("SELECT MAX(id) AS n FROM events WHERE session = ?", (sid,)).fetchone()
+            return int(row["n"] or 0)
+
+        async def wait_turn(child, mark: int, minutes: float) -> dict:
+            """Конец хода сессии-поручения (событие result после mark) → {done, answer, error}."""
+            stop = time.monotonic() + max(0.0, min(120.0, minutes)) * 60
+            while True:
+                rows = self.bridge.db.execute("SELECT data FROM events WHERE session = ? AND id > ? ORDER BY id",
+                                              (child.id, mark)).fetchall()
+                answer, error, done = "", "", False
+                for row in rows:
+                    ev = json.loads(row["data"])
+                    if ev.get("parent"):
+                        continue
+                    if ev.get("kind") == "text":
+                        answer = ev.get("text") or answer
+                    elif ev.get("kind") == "error":
+                        error = ev.get("text") or ev.get("code") or "error"
+                    elif ev.get("kind") == "result":
+                        done = True
+                if done or time.monotonic() >= stop or not self.bridge._row(child.id):
+                    return {"done": done, "answer": answer, "error": error}
+                await asyncio.sleep(1.5)
+
+        def report(child, got: dict) -> dict:
+            name = agents.NAMES.get(child.row.get("agent") or "", "agent")
+            if not got["done"]:
+                return text(f"{name} is still working (session {child.id}). Call agent_result with this session_id later.")
+            if got["error"] and not got["answer"]:
+                return text(f"{name} failed (session {child.id}): {got['error']}", True)
+            return text(f"{name} answered (session {child.id}; the owner can open it on the site):\n\n"
+                        + _trim(got["answer"] or "(no text answer)", 30000))
+
+        @tool("agent_run", "Delegate a task to another coding agent on this machine (Codex, Gemini/Antigravity, OpenCode, "
+              "another Claude Code…) in the same project, like sub-agents in T3 Code. The bridge opens a separate session "
+              "of that agent (the owner sees it on the site), sends the prompt, waits for the end of its turn and returns "
+              "its final answer. Several calls in parallel run in parallel.", run_schema)
+        async def agent_run(args):
+            prompt = str(args.get("prompt") or "").strip()
+            if not prompt:
+                return text("Empty prompt", True)
+            try:
+                if args.get("session_id"):
+                    child = self.bridge.get(str(args["session_id"]))
+                    if child.row.get("origin") != "sub:" + self.id:
+                        return text("Not a session delegated from this one", True)
+                else:
+                    agent = str(args.get("agent") or "")
+                    if agent not in agents.NAMES:
+                        return text("Unknown agent; one of: " + ", ".join(agents.NAMES), True)
+                    child = self.bridge.create(self.row["project"], str(args.get("model") or "") or None, None, agent,
+                                               origin="sub:" + self.id, access=self.access)
+                    title = " ".join(str(args.get("title") or prompt).split())[:70]
+                    self.bridge.update(child.id, title=title)
+                    self.bridge.add_event(child.id, {"kind": "note", "code": "subtask_from", "to": self.id,
+                                                     "agent": "claude", "title": self.row["title"] or "",
+                                                     "text": f"Task from Claude Code: “{self.row['title'] or 'New session'}”"})
+                    self._event({"kind": "note", "code": "subtask", "to": child.id, "agent": agent, "title": title,
+                                 "text": f"Task for {agents.NAMES[agent]}: “{title}”"})
+                mark = last_event_id(child.id)
+                await child.send(prompt, mode="now" if child.status == "idle" else "later")
+            except BridgeError as e:
+                return text(f"Not started: {e}", True)
+            except Exception as e:                     # агент не запустился (не вошёл, нет программы) — сказать Claude
+                log.exception("agent_run")
+                return text(f"Not started: {e}", True)
+            if args.get("wait") is False:
+                return text(f"Started: session {child.id} ({agents.NAMES.get(child.row.get('agent') or '', '')}). "
+                            "Collect the answer with agent_result.")
+            return report(child, await wait_turn(child, mark, float(args.get("timeout_minutes") or 30)))
+
+        @tool("agent_result", "Answer of a session started with agent_run: waits for its current turn to end (up to "
+              "timeout_minutes) and returns the agent's last answer.", result_schema)
+        async def agent_result(args):
+            try:
+                child = self.bridge.get(str(args.get("session_id") or ""))
+            except BridgeError as e:
+                return text(str(e), True)
+            if child.row.get("origin") != "sub:" + self.id:
+                return text("Not a session delegated from this one", True)
+            # ответ последнего хода: от последнего сообщения (user) — дальше
+            row = self.bridge.db.execute("SELECT MAX(id) AS n FROM events WHERE session = ? AND data LIKE '%\"kind\": \"user\"%'",
+                                         (child.id,)).fetchone()
+            mark = int(row["n"] or 0)
+            minutes = args.get("timeout_minutes")
+            return report(child, await wait_turn(child, mark, 10.0 if minutes is None else float(minutes)))
+
+        return [agent_run, agent_result]
+
     def _options(self) -> ClaudeAgentOptions:
         r = self.row
         return ClaudeAgentOptions(
@@ -509,7 +629,7 @@ class Session:
             # тулы местного расширения (extension.py) — рядом с «показать файл»
             # раскладку по соседним сессиям (open_sessions) владелец отключил 16.11.2026: по замеру почти не окупается
             mcp_servers={"lozhka": create_sdk_mcp_server("lozhka", tools=self._host_tools()
-                                                         + [self._file_tool()]),
+                                                         + [self._file_tool()] + self._agent_tools()),
                          **({"yune": yune_mcp_server(self.id)} if YUNE_MCP else {})},
             include_partial_messages=True, setting_sources=["user", "project", "local"],
             system_prompt={"type": "preset", "preset": "claude_code", "append": append_prompt()},

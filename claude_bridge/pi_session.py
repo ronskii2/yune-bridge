@@ -324,7 +324,7 @@ class PiSession(Session):
         if not self.client or not self.turn:
             return
         self._write({"type": "abort"})
-        self._event({"kind": "note", "text": codex_session.STOPPED})
+        self._event(dict(codex_session.STOP_NOTE))
 
     async def close(self) -> None:
         proc = self.proc

@@ -144,50 +144,52 @@ def reads(name: str) -> bool:
 
 
 ACCESS_NOTE = {  # i18n: model
-    "full": "[Режим доступа сессии: полный — правки и команды без подтверждений.]",
-    "ask": "[Режим доступа сессии: «Спрашивать» — перед правкой файлов и командами владелец подтверждает каждое действие "
-           "на сайте; запретил — не повторяй то же действие в обход, спроси или предложи другое.]",
-    "read": "[Режим доступа сессии: только чтение — правки файлов и команды запрещены; читай, ищи, объясняй и предлагай "
-            "правки текстом.]",
-    "auto": "[Режим доступа сессии: авто — обычные правки и команды выполняются сами, рискованные Claude Code сначала "
-            "проверяет; если спросит владельца — запретил, не повторяй то же действие в обход.]",
+    "full": "[Session access mode: full — edits and commands run without confirmation.]",
+    "ask": "[Session access mode: Ask — the owner confirms every file edit and command on the site; if they deny "
+           "an action, don't repeat it another way — ask or suggest something else.]",
+    "read": "[Session access mode: read-only — file edits and commands are forbidden; read, search, explain and suggest "
+            "edits as text.]",
+    "auto": "[Session access mode: auto — ordinary edits and commands run on their own, Claude Code checks risky ones "
+            "first; if the owner denies one, don't repeat the same action another way.]",
 }
-DENY_READ = ("Режим сессии «Только чтение»: правки файлов и команды запрещены владельцем. Не пытайся обойти — "  # i18n: model
-             "предложи правку текстом.")
-DENY_ASK = "Владелец запретил это действие."  # i18n: model
-DENY_SAID = "Владелец запретил это действие и написал: {}"  # i18n: model
+DENY_READ = ("Session mode Read-only: the owner has forbidden file edits and commands. Don't try to work around it — "
+             "suggest the edit as text.")
+DENY_ASK = "The owner denied this action."
+DENY_SAID = "The owner denied this action and wrote: {}"
 RESUME_GAP = 60                     # автопродолжение — через минуту после обновления лимита
 RETRY_SEC = 30 * 60                 # когда обновится, неизвестно (Codex, текст без времени) — пробуем раз в полчаса
-RESUME = "Лимит восстановился — продолжай с того места, где остановился."  # i18n: model
-RETRY = "Продолжай с того места, где остановился."  # i18n: model
+RESUME = "The usage limit has reset — continue from where you stopped."
+RETRY = "Continue from where you stopped."
 RESETS_RE = re.compile(r"resets\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\s+(?P<day>\d{1,2}),?\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?"
                        r"\s*(?P<ap>am|pm)?\s*(?:\((?P<tz>[^)]+)\))?", re.I)
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 APPEND = """
-Сессия идёт с сайта владельца: он видит твои ответы и шаги в ленте, часто говорит голосом — текст распознан
-автоматически, возможны ошибки распознавания — понимай по смыслу, переспрашивай, только если смысл правда неясен.
-Вопрос с вариантами — только тулом AskUserQuestion: на сайте это карточка с кнопками.
-{keys}Значение ключа не выводи (не cat/echo/grep по файлу с ним): нужен в команде — подставляй из файла (source, $VAR).
-Показать владельцу файл (скриншот сделанного, картинку, PDF, архив, лог) — тулом mcp__lozhka__send_file: картинки и
-видео он увидит прямо в ленте, остальное — файлом для скачивания. Скриншот страницы — Playwright с хоста.
-Файлы, которые прислал владелец, лежат по путям из сообщения — открывай их Read.
-Отвечай на языке, на котором пишет владелец (пишет по-русски — отвечай по-русски), даже если настройки или правила
-машины велят другой язык.
+The session runs from the owner's website: they see your replies and steps in the feed and often speak by voice — the
+text is transcribed automatically and may contain recognition errors; understand by meaning and ask again only if the
+meaning is really unclear.
+Questions with options — only via the AskUserQuestion tool: on the site it becomes a card with buttons.
+{keys}Never print a key's value (no cat/echo/grep on the file that holds it): if a command needs it, take it from the
+file (source, $VAR).
+To show the owner a file (a screenshot of your work, an image, PDF, archive, log) — use the mcp__lozhka__send_file
+tool: images and video appear right in the feed, anything else as a download. Page screenshots — Playwright on this
+machine.
+Files the owner sent are at the paths given in the message — open them with Read.
+Reply in the language the owner writes in, even if the machine's settings or rules ask for another language.
 """
 
 # Мост на машине пользователя (remote.py): MCP Yune на сайте — {"url": site + "/mcp", "token": "m.<машина>.<ключ машины>"}.
 # Инструменты Yune (картинки, видео, музыка, голос…) идут через сайт (его MCP) — обновление доходит до машин
 # с выкаткой сайта, мост трогать не нужно. Мост по сокету (server.py) — None.
 YUNE_MCP: dict | None = None
-YUNE_NOTE = ("Инструменты Yune (картинки, видео, музыка, голос, чтение ссылок, презентации, 3D) — mcp__yune__*: тратят "  # i18n: model
-             "баланс владельца в Yune (у машины дневной лимит), файлы приходят ссылками — скачивай curl. Платное — "
-             "только когда владелец просит.\n")
+YUNE_NOTE = ("Yune tools (images, video, music, voice, reading links, presentations, 3D) — mcp__yune__*: they spend "
+             "the owner's Yune balance (the machine has a daily limit); files come as links — download them with curl. "
+             "Paid tools — only when the owner asks.\n")
 
 
 # ключи — как просить без расширения; расширение со своим тулом ключей отдаёт свой текст (keys_prompt)
-KEYS = ("Ключи, токены, пароли никогда не проси прислать текстом: скажи, в какой env-файл и под каким именем их "  # i18n: model
-        "положить.\n")
+KEYS = ("Never ask for keys, tokens or passwords as plain text: tell the owner which env file and variable name to "
+        "put them in.\n")
 
 
 def append_prompt() -> str:  # i18n: model
@@ -205,7 +207,7 @@ def yune_mcp_server(session_id: str) -> dict:
 
 # Устройство, с которого владелец начал сессию (сайт берёт из User-Agent): строкой перед первым
 # сообщением (столбец intro) — один раз, в системную подсказку не идёт, кэш подсказки у всех сессий общий
-DEVICE = "[Владелец начал сессию с устройства: {}. Видео ему — mp4 (H.264), webm Safari не играет.]\n\n"  # i18n: model
+DEVICE = "[The owner started the session from: {}. Send them video as mp4 (H.264) — Safari doesn't play webm.]\n\n"
 
 
 def device_note(device) -> str | None:
@@ -324,7 +326,7 @@ def match_answers(questions: list, answers: dict) -> dict:
             out[text] = left.pop(text)
             continue
         for key in list(left):
-            head = key.split("\n…[ещё ", 1)[0]  # i18n: internal — хвост _trim
+            head = re.split(r"\n…\[(?:ещё |\d+ more)", key, 1)[0]  # хвост _trim — и прежний, русский
             if head and text.startswith(head):
                 out[text] = left.pop(key)
                 break
@@ -337,7 +339,7 @@ def match_answers(questions: list, answers: dict) -> dict:
 
 def _trim(value, limit: int = TRIM):
     if isinstance(value, str):
-        return value if len(value) <= limit else value[:limit] + f"\n…[ещё {len(value) - limit} зн.]"
+        return value if len(value) <= limit else value[:limit] + f"\n…[{len(value) - limit} more chars]"
     if isinstance(value, dict):
         return {k: _trim(v, limit) for k, v in value.items()}
     if isinstance(value, list):
@@ -382,7 +384,7 @@ def _result_text(content) -> str:
             if item.get("type") == "text":
                 parts.append(item.get("text") or "")
             elif item.get("type") == "image":
-                parts.append("[картинка]")
+                parts.append("[image]")
     return "\n".join(parts)
 
 
@@ -476,12 +478,13 @@ class Session:
 
     def _file_tool(self):
         schema = {"type": "object",
-                  "properties": {"path": {"type": "string", "description": "Абсолютный путь к файлу на сервере"},
-                                 "caption": {"type": "string", "description": "Подпись для владельца (по-русски), можно пусто"}},
+                  "properties": {"path": {"type": "string", "description": "Absolute path to the file on this machine"},
+                                 "caption": {"type": "string", "description": "Caption for the owner, in their language; may be empty"}},
                   "required": ["path"]}
 
-        @tool("send_file", "Показать владельцу файл с сервера в ленте сессии на сайте: картинки и видео — прямо в "
-              "ленте, остальное — файлом для скачивания. До 50 МБ. Файл копируется, оригинал можно менять дальше.", schema)
+        @tool("send_file", "Show the owner a file from this machine in the session feed on the site: images and video "
+              "right in the feed, anything else as a download. Up to 50 MB. The file is copied, the original can keep "
+              "changing.", schema)
         async def send_file(args):
             path = os.path.expanduser(str(args.get("path") or ""))
             if not os.path.isabs(path):
@@ -489,10 +492,10 @@ class Session:
             try:
                 info = await asyncio.to_thread(self.bridge.store_file, self.id, path)
             except (OSError, BridgeError) as e:
-                return {"content": [{"type": "text", "text": f"Файл не отправлен: {e}"}], "is_error": True}
+                return {"content": [{"type": "text", "text": f"File not sent: {e}"}], "is_error": True}
             info.pop("path", None)
             self._event({"kind": "file", **info, "caption": str(args.get("caption") or "")[:1000]})
-            return {"content": [{"type": "text", "text": f"Владелец видит {info['name']} в ленте."}]}
+            return {"content": [{"type": "text", "text": f"The owner sees {info['name']} in the feed."}]}
 
         return send_file
 
@@ -634,7 +637,7 @@ class Session:
                     self.bridge.update(self.id, claude_id=claude_id)
             elif msg.subtype == "compact_boundary":
                 self.compacted = True
-                self._event({"kind": "note", "code": "compacted", "text": "Контекст сжат"})   # text — старым сайтам
+                self._event({"kind": "note", "code": "compacted", "text": "Context compacted"})   # text — старым сайтам
             return
         if isinstance(msg, ResultMessage):
             self.live = ""
@@ -806,7 +809,7 @@ class Session:
         self._event({"kind": "question", "rid": rid, "questions": _trim(inp.get("questions") or [])})
         answers = await self._wait(rid, "question")
         if answers is None:
-            return PermissionResultDeny(message="Владелец остановил ход", interrupt=True)
+            return PermissionResultDeny(message="The owner stopped the turn", interrupt=True)
         answers = match_answers(inp.get("questions") or [], answers)
         self._event({"kind": "answer", "rid": rid, "answers": answers})
         return PermissionResultAllow(updated_input={**inp, "answers": answers})
@@ -819,7 +822,7 @@ class Session:
                      "agent_id": getattr(ctx, "agent_id", None)})
         answer = await self._wait(rid, "permission")
         if answer is None:
-            return PermissionResultDeny(message="Владелец остановил ход", interrupt=True)  # i18n: model
+            return PermissionResultDeny(message="The owner stopped the turn", interrupt=True)
         decision, said = answer.get("decision"), answer.get("text") or None
         self._event({"kind": "permit", "rid": rid, "decision": decision, "text": said})
         if decision == "all":
@@ -834,7 +837,7 @@ class Session:
         """Режим доступа сессии. Claude Code — сразу (живому процессу set_permission_mode), Codex — со следующего хода.
         Ждущие разрешения решаются новым режимом: «Полный доступ» — разрешить, «Только чтение» — запретить."""
         if access not in ACCESS:
-            raise BridgeError("нет такого режима")  # i18n: internal
+            raise BridgeError("no such mode")
         if access == self.access:
             return
         self.bridge.update(self.id, access=access)
@@ -871,7 +874,7 @@ class Session:
     def resolve(self, rid: str, kind: str, value) -> None:
         entry = self.pending.get(rid)
         if not entry or entry[0] != kind:
-            raise BridgeError("этот вопрос уже закрыт")
+            raise BridgeError("this question is already closed")
         if not entry[1].done():
             entry[1].set_result(value)
 
@@ -884,7 +887,7 @@ class Session:
         text = text.strip()
         files = [f for f in (self.bridge.file_info(self.id, fid) for fid in (fids or [])[:20]) if f]
         if not text and not files:
-            raise BridgeError("пустое сообщение")
+            raise BridgeError("empty message")
         self.last_active = time.monotonic()
         if self.row.get("snoozed"):
             self.bridge.update(self.id, snoozed=0)          # написал в отложенную — снова в работе
@@ -916,11 +919,11 @@ class Session:
         """Отложенное сообщение: edit (новый текст), hold (владелец правит — не отправлять), cancel, now."""
         item = next((q for q in self.outbox if q["qid"] == qid), None)
         if not item:
-            raise BridgeError("сообщение уже отправлено")
+            raise BridgeError("message already sent")
         if op == "edit":
             text = (text or "").strip()
             if not text and not item.get("files"):
-                raise BridgeError("пустое сообщение")
+                raise BridgeError("empty message")
             item.update(text=text, hold=False, parts=None)
             self.bridge.outbox_put(self.id, item)
         elif op == "hold":
@@ -964,7 +967,7 @@ class Session:
                          **({"mode": str(answer.get("mode") or "text")} if answer else {})})
         text = said
         if files:
-            text = (text or "Посмотри файлы.") + "\n\nФайлы от владельца:\n" + "\n".join(  # i18n: model
+            text = (text or "Look at the files.") + "\n\nFiles from the owner:\n" + "\n".join(
                 f"- {f['path']} ({f['name']}, {f['mime']})" for f in files)
             images = [f["path"] for f in files if f["mime"].startswith("image/")]
         text = "\n\n".join(p for p in [lead, text] if p)
@@ -1032,19 +1035,19 @@ class Session:
                 await self.client.interrupt()
             except Exception as e:  # noqa: BLE001
                 log.info("[%s] interrupt: %s", self.id, e)
-            self._event({"kind": "note", "text": "Остановлено"})
+            self._event({"kind": "note", "code": "stopped", "text": "Stopped"})
 
     async def configure(self, model: str | None, effort: str | None) -> None:
         """Модель и уровень — из списка Claude Code (agents.models). Уровня, которого у новой модели нет, не передаём."""
         changes = {}
         if model and model != self.row["model"]:
             if not agents.valid_model("claude", model):
-                raise BridgeError("нет такой модели")
+                raise BridgeError("no such model")
             changes["model"] = model
         target = changes.get("model", self.row["model"])
         if effort and effort != self.row["effort"]:
             if not agents.valid_effort("claude", target, effort):
-                raise BridgeError("нет такого уровня")
+                raise BridgeError("no such level")
             changes["effort"] = effort
         elif self.row["effort"] and "model" in changes and not agents.valid_effort("claude", target, self.row["effort"]):
             changes["effort"] = ""
@@ -1057,7 +1060,8 @@ class Session:
             elif "model" in changes:
                 await self.client.set_model(_model_arg(target))
         name = next((m["name"] for m in agents.models("claude") if m["id"] == self.row["model"]), self.row["model"])
-        self._event({"kind": "note", "text": "Дальше: " + ", ".join(x for x in (name, self.row["effort"]) if x)})
+        what = ", ".join(x for x in (name, self.row["effort"]) if x)
+        self._event({"kind": "note", "code": "next", "what": what, "text": "Next: " + what})
 
 
 class Bridge:
@@ -1087,7 +1091,7 @@ class Bridge:
         if sid not in self.sessions:
             row = self._row(sid)
             if not row:
-                raise BridgeError("нет такой сессии")
+                raise BridgeError("no such session")
             self.sessions[sid] = _session_class(row)(self, row)
         return self.sessions[sid]
 
@@ -1194,10 +1198,10 @@ class Bridge:
                rules: dict | None = None) -> Session:
         card = projects.resolve(project)
         if not card:
-            raise BridgeError("нет такого проекта")
+            raise BridgeError("no such project")
         agent = agent or "claude"
         if agent not in agents.NAMES:
-            raise BridgeError("нет такого агента")
+            raise BridgeError("no such agent")
         base_model, base_effort = agents.defaults(agent)
         model = model if agents.valid_model(agent, model) else base_model
         if not agents.valid_effort(agent, model, effort):
@@ -1205,7 +1209,7 @@ class Bridge:
         access = access if access in ACCESS else "full"
         rules = agent_rules.clean(rules)
         if rules and agent != "claude":
-            raise BridgeError("права агента — только у Claude Code")  # i18n: internal
+            raise BridgeError("agent permissions are only for Claude Code")
         if rules:                               # агент знает свои права с первого сообщения
             intro = agent_rules.summary(rules) + (intro or "")
         if card.get("note"):                    # вид проекта (projects.VIEWS): над какой витриной работаем
@@ -1260,11 +1264,11 @@ class Bridge:
         if row:
             return self.get(row["id"]), item or {}
         if not item:
-            raise BridgeError("нет такой сессии")  # i18n: internal
+            raise BridgeError("no such session")
         try:
             card = projects.add_folder(item["cwd"])
         except ValueError:
-            raise BridgeError("папки этой сессии на машине больше нет") from None  # i18n: internal
+            raise BridgeError("this session's folder is gone from the machine") from None
         session = self.create(card["id"], None, None, "claude", origin="terminal")
         rows = []
         for ts, ev in outside.events(path):
@@ -1295,29 +1299,30 @@ class Bridge:
         old = self.get(sid)
         row = old.row
         if agent not in agents.NAMES:
-            raise BridgeError("нет такого агента")
+            raise BridgeError("no such agent")
         d = self.digest(sid)
         cwd = row["cwd"]
         rel = [p[len(cwd) + 1:] if p.startswith(cwd + "/") else p for p in d["files"]]
-        name = agents.NAMES.get(row.get("agent") or "claude", "агента")
-        parts = [f"[Продолжение беседы «{row['title'] or 'Новая сессия'}» из {name} в этом же проекте ({cwd}). Что было:"]
+        name = agents.NAMES.get(row.get("agent") or "claude", "another agent")
+        parts = [f"[Continuing the conversation “{row['title'] or 'New session'}” from {name} in the same project ({cwd}). What happened:"]
         if d["messages"]:
-            parts.append("Сообщения владельца:\n" + "\n".join(f"{n}. {_trim(t, 1500)}" for n, t in
+            parts.append("Owner's messages:\n" + "\n".join(f"{n}. {_trim(t, 1500)}" for n, t in
                                                            enumerate(d["messages"][-20:], 1)))
         if d["answers"]:
-            parts.append("Итоговые ответы агента:\n" + "\n\n".join(f"— {_trim(t, 3000)}" for t in d["answers"][-6:]))
+            parts.append("Agent's final answers:\n" + "\n\n".join(f"— {_trim(t, 3000)}" for t in d["answers"][-6:]))
         if rel:
-            parts.append("Изменённые файлы: " + ", ".join(rel[:60]))
-        parts.append("Логи команд не передаются — нужно, посмотри сам (git status, git diff, git log).]\n\n"
-                     "Новое сообщение владельца:\n")
+            parts.append("Changed files: " + ", ".join(rel[:60]))
+        parts.append("Command logs are not included — if you need them, check yourself (git status, git diff, git log).]\n\n"
+                     "New message from the owner:\n")
         session = self.create(row["project"], model, effort, agent, intro="\n\n".join(parts), origin=sid,
                               access=old.access)
-        session_title = (row["title"] or "Новая сессия") + " — продолжение"
+        session_title = (row["title"] + " (2)") if row["title"] else ""
         self.update(session.id, title=session_title[:120])
-        self.add_event(session.id, {"kind": "handoff", "from": sid, "from_title": row["title"] or "Новая сессия",
+        self.add_event(session.id, {"kind": "handoff", "from": sid, "from_title": row["title"] or "",
                                     "from_agent": row.get("agent") or "claude", "messages": len(d["messages"]),
                                     "answers": len(d["answers"]), "files": rel[:60]})
-        self.add_event(sid, {"kind": "note", "text": f"Продолжено в {agents.NAMES[agent]}: «{session_title}»",
+        self.add_event(sid, {"kind": "note", "code": "continued", "agent": agents.NAMES[agent], "title": session_title,
+                             "text": f"Continued in {agents.NAMES[agent]}: “{session_title}”",
                              "to": session.id})
         return session
 
@@ -1342,7 +1347,7 @@ class Bridge:
     def save_file(self, sid: str, name: str, data: bytes) -> dict:
         """Файл владельца (или копия файла с сервера) → {fid, name, mime, size, path}."""
         if len(data) > MAX_FILE:
-            raise BridgeError("файл больше 50 МБ")
+            raise BridgeError("file is larger than 50 MB")
         name = os.path.basename(name or "file").strip().replace("/", "_")[:120] or "file"
         name = "".join(ch for ch in name if ch.isprintable()) or "file"
         fid = uuid.uuid4().hex[:16]
@@ -1354,9 +1359,9 @@ class Bridge:
 
     def store_file(self, sid: str, src: str) -> dict:
         if not os.path.isfile(src):
-            raise BridgeError(f"нет файла {src}")
+            raise BridgeError(f"no file {src}")
         if os.path.getsize(src) > MAX_FILE:
-            raise BridgeError("файл больше 50 МБ")
+            raise BridgeError("file is larger than 50 MB")
         with open(src, "rb") as f:
             return self.save_file(sid, os.path.basename(src), f.read())
 

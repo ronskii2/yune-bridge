@@ -90,10 +90,10 @@ def _match(path: str, patterns: list[str], cwd: str) -> bool:
 def _file(rules: dict, path: str, cwd: str, write: bool) -> tuple[str, str]:
     f = rules["files"]
     if _match(path, f["deny"], cwd):
-        return "deny", f"Закрыто правами агента: {path}"  # i18n: model
+        return "deny", f"Blocked by agent permissions: {path}"
     if write:
-        return ("allow", "") if _match(path, f["write"], cwd) else ("deny", f"Писать сюда правами агента нельзя: {path}. Где можно: {', '.join(f['write']) or 'нигде'}")  # i18n: model
-    return ("allow", "") if _match(path, f["read"], cwd) else ("deny", f"Читать это правами агента нельзя: {path}")  # i18n: model
+        return ("allow", "") if _match(path, f["write"], cwd) else ("deny", f"Agent permissions don't allow writing here: {path}. Allowed: {', '.join(f['write']) or 'nowhere'}")
+    return ("allow", "") if _match(path, f["read"], cwd) else ("deny", f"Agent permissions don't allow reading this: {path}")
 
 
 def _command_mode(rules: dict, command: str, cwd: str) -> tuple[str, str]:
@@ -108,12 +108,12 @@ def _command_mode(rules: dict, command: str, cwd: str) -> tuple[str, str]:
             if (words == m or words.startswith(m + " ")) and len(m) > best:
                 mode, rule, best = r["mode"], m, len(m)
         if STRICT[mode] > STRICT[worst]:
-            worst, why = mode, rule or "по умолчанию"  # i18n: model
+            worst, why = mode, rule or "default"
     # запись перенаправлением и tee — как запись файла: только в write
     for target in REDIRECT.findall(command):
         verdict, _ = _file(rules, _abs(target.strip("'\""), cwd), cwd, True)
         if verdict == "deny" and target not in ("/dev/null", "&1", "&2"):
-            return "no", f"запись в {target}"  # i18n: model
+            return "no", f"writing to {target}"
     # закрытые пути, названные в команде (cat .env) — нельзя
     try:
         tokens = shlex.split(command, posix=True)
@@ -123,7 +123,7 @@ def _command_mode(rules: dict, command: str, cwd: str) -> tuple[str, str]:
         if t.startswith("-") or ("/" not in t and "." not in t):
             continue
         if _match(_abs(t, cwd), rules["files"]["deny"], cwd):
-            return "no", f"закрытый путь {t}"  # i18n: model
+            return "no", f"blocked path {t}"
     return worst, why
 
 
@@ -136,25 +136,25 @@ def decide(rules: dict, tool: str, inp: dict, cwd: str, reads: bool) -> tuple[st
     if tool == "Bash":
         mode, why = _command_mode(rules, str(inp.get("command") or ""), cwd)
         if mode == "no":
-            return "deny", f"Команда запрещена правами агента ({why})."  # i18n: model
+            return "deny", f"Command forbidden by agent permissions ({why})."
         return ("ask", why) if mode == "ask" else ("allow", "")
     if reads:
         return "allow", ""
     mode = rules["commands"]["default"]
     if mode == "no":
-        return "deny", f"{tool}: запрещено правами агента."  # i18n: model
+        return "deny", f"{tool}: forbidden by agent permissions."
     return ("ask", "") if mode == "ask" else ("allow", "")
 
 
 def summary(rules: dict) -> str:  # i18n: model
     """Права одной строкой для агента — в первое сообщение сессии."""
     f, c = rules["files"], rules["commands"]
-    mode = {"self": "сам", "ask": "с подтверждением владельца", "no": "нельзя"}
-    parts = [f"читать: {', '.join(f['read'])}", f"писать: {', '.join(f['write']) or 'нигде'}"]
+    mode = {"self": "on its own", "ask": "with the owner's confirmation", "no": "not allowed"}
+    parts = [f"read: {', '.join(f['read'])}", f"write: {', '.join(f['write']) or 'nowhere'}"]
     if f["deny"]:
-        parts.append(f"закрыто: {', '.join(f['deny'])}")
-    parts.append(f"команды по умолчанию — {mode[c['default']]}")
+        parts.append(f"blocked: {', '.join(f['deny'])}")
+    parts.append(f"commands by default — {mode[c['default']]}")
     for r in c["rules"]:
-        parts.append(f"«{r['match']}» — {mode[r['mode']]}")
-    return ("[Права агента (их проверяет мост на каждом действии, обойти нельзя; нужно больше — скажи владельцу, что и "
-            "зачем): " + "; ".join(parts) + ".]\n\n")
+        parts.append(f"“{r['match']}” — {mode[r['mode']]}")
+    return ("[Agent permissions (the bridge checks them on every action, they can't be bypassed; if you need more, tell "
+            "the owner what and why): " + "; ".join(parts) + ".]\n\n")

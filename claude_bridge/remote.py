@@ -233,7 +233,7 @@ class Tunnel:
         site = web.SockSite(runner, sock)
         await site.start()
         self.base = f"http://127.0.0.1:{port}"
-        log.info("локальный мост: %s", self.base)
+        log.info("local bridge: %s", self.base)
         return runner
 
     async def run(self) -> None:
@@ -258,7 +258,7 @@ class Tunnel:
                                 await ws.send_json({"t": "hello", "machine": {**agents.machine(), "name": self.cfg.get("name")},
                                                     "version": 1, "build": update.BUILD,
                                                     "caps": [] if update.managed() else update.CAPS})
-                                log.info("на связи с %s", self.cfg["site"])
+                                log.info("connected to %s", self.cfg["site"])
                                 events = asyncio.create_task(self.forward_events(ws))
                                 try:
                                     async for msg in ws:
@@ -276,11 +276,11 @@ class Tunnel:
                                     self.ws = None
                     except aiohttp.WSServerHandshakeError as e:
                         if e.status in (401, 403):
-                            log.error("сайт не пускает машину (%s): её отключили — привяжите заново (pair)", e.status)
+                            log.error("the site refuses this machine (%s): it was disconnected — pair it again (pair)", e.status)
                             return
-                        log.warning("сайт ответил %s — повтор через %s с", e.status, delay)
+                        log.warning("the site answered %s — retry in %s s", e.status, delay)
                     except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
-                        log.warning("нет связи с сайтом: %s — повтор через %s с", e, delay)
+                        log.warning("no connection to the site: %s — retry in %s s", e, delay)
                     try:
                         await asyncio.wait_for(self.stop.wait(), delay)
                     except asyncio.TimeoutError:
@@ -301,13 +301,13 @@ class Tunnel:
             if not build or build == update.BUILD or update.managed():
                 return
             if update.pinned() == "github" and source != "github":
-                log.warning("сайт предлагает сборку %s не с GitHub — источник закреплён, беру релиз с GitHub", build)
+                log.warning("the site offers build %s not from GitHub — source is pinned, taking the GitHub release", build)
                 source = "github"
             if any(getattr(x, "status", "idle") != "idle" for x in list(self.bridge.sessions.values())):
                 await self.send_status("waiting")
-                log.info("обновление моста до %s — после конца сессий", build)
+                log.info("bridge update to %s — after sessions end", build)
                 await update.wait_idle(self.bridge)
-            log.info("обновляю мост %s → %s (%s)", update.BUILD or "—", build, source or "site")
+            log.info("updating bridge %s → %s (%s)", update.BUILD or "—", build, source or "site")
             if source == "github":                # к GitHub — без заголовков и адреса сайта
                 async with aiohttp.ClientSession() as s:
                     files = await update.fetch(self.cfg["site"], s, build, "github")
@@ -322,7 +322,7 @@ class Tunnel:
             if self.ws is not None:
                 await self.ws.close()
         except Exception as e:  # noqa: BLE001 — старый мост цел и работает дальше; сайт покажет ошибку
-            log.exception("обновление моста")
+            log.exception("bridge update")
             await self.send_status("failed", str(e)[:300])
         finally:
             self.updating = None
@@ -366,7 +366,7 @@ class Tunnel:
                     out = {"t": "res", "id": rid, "status": resp.status, "mime": ctype,
                            "b64": base64.b64encode(await resp.read()).decode()}
         except Exception as e:  # noqa: BLE001
-            out = {"t": "res", "id": rid, "status": 502, "json": {"ok": False, "error": f"мост: {e}"[:300]}}
+            out = {"t": "res", "id": rid, "status": 502, "json": {"ok": False, "error": f"bridge: {e}"[:300]}}
         try:
             await ws.send_str(json.dumps(out, ensure_ascii=False))
         except (ConnectionResetError, RuntimeError):

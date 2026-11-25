@@ -346,7 +346,7 @@ class AcpSession(Session):
         if self.status == "idle" or not self.client:
             return
         self.proc.notify("session/cancel", {"sessionId": self.sid})
-        self._event({"kind": "note", "text": codex_session.STOPPED})
+        self._event(dict(codex_session.STOP_NOTE))
         for _ in range(CANCEL_WAIT * 10):
             if not self.lock.locked():
                 return

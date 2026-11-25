@@ -156,7 +156,7 @@ def events(path: str) -> list[tuple[float | None, dict]]:
             last_ts = ts
             if kind == "system":
                 if d.get("subtype") == "compact_boundary":
-                    out.append((ts, {"kind": "note", "code": "compacted", "text": "Контекст сжат"}))  # i18n: internal
+                    out.append((ts, {"kind": "note", "code": "compacted", "text": "Context compacted"}))
                 continue
             msg = d.get("message") or {}
             content = msg.get("content")

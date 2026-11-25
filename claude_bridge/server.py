@@ -61,15 +61,15 @@ async def open_local(cwd: str, path: str, reveal: bool = False) -> None:
     import sys
     path = path.strip()
     if not path or len(path) > 4096 or "\0" in path:
-        raise BridgeError("no_path: пустой путь")  # i18n: internal
+        raise BridgeError("no_path: empty path")
     root = os.path.realpath(cwd)
     full = os.path.realpath(os.path.join(root, os.path.expanduser(path)))
     if full != root and not full.startswith(root.rstrip(os.sep) + os.sep):
-        raise BridgeError("outside: путь вне папки сессии")  # i18n: internal
+        raise BridgeError("outside: path is outside the session folder")
     if not os.path.exists(full):
-        raise BridgeError("missing: такого файла нет")  # i18n: internal
+        raise BridgeError("missing: no such file")
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        raise BridgeError("no_screen: у этой машины нет экрана")  # i18n: internal
+        raise BridgeError("no_screen: this machine has no screen")
     if sys.platform == "win32":
         if reveal:
             await asyncio.create_subprocess_exec("explorer", "/select," + full)
@@ -86,7 +86,7 @@ async def open_local(cwd: str, path: str, reveal: bool = False) -> None:
     except asyncio.TimeoutError:
         return                                   # программа открылась и держит процесс — это нормально
     if proc.returncode:
-        raise BridgeError((err or b"").decode(errors="replace").strip()[:200] or "не открылось")  # i18n: internal
+        raise BridgeError((err or b"").decode(errors="replace").strip()[:200] or "didn't open")
 
 log = logging.getLogger("claude_bridge")
 SOCKET = os.path.join(DATA, "run", "bridge.sock")
@@ -118,7 +118,7 @@ TOKEN = os.environ.get("CLAUDE_BRIDGE_TOKEN", "")
 @web.middleware
 async def require_token(request, handler):
     if TOKEN and not hmac.compare_digest((request.headers.get("X-Bridge-Token") or "").encode(), TOKEN.encode()):
-        log.warning("запрос без токена: %s %s", request.method, request.path)
+        log.warning("request without token: %s %s", request.method, request.path)
         return _json({"ok": False, "error": "forbidden"}, status=403)
     return await handler(request)
 
@@ -264,7 +264,7 @@ def make_app(bridge: Bridge) -> web.Application:
         try:
             card = await asyncio.to_thread(projects.resolve, project)
             if not card:
-                raise BridgeError("нет такого проекта")
+                raise BridgeError("no such project")
             session = bridge.create(project, body.get("model"), body.get("effort"), str(body.get("agent") or "claude"),
                                     intro=device_note(body.get("device")), access=body.get("access"),
                                     rules=body.get("rules") if isinstance(body.get("rules"), dict) else None)
@@ -315,13 +315,13 @@ def make_app(bridge: Bridge) -> web.Application:
             elif name == "answer":
                 answers = body.get("answers")
                 if not isinstance(answers, dict):
-                    return _error("answers — объект")
+                    return _error("answers must be an object")
                 session.resolve(str(body.get("rid")), "question",
                                 {str(k)[:TRIM_KEY]: str(v)[:4000] for k, v in answers.items()})
             elif name == "secret":
                 value = None if body.get("cancel") else str(body.get("value") or "")
                 if value is not None and not value.strip():
-                    return _error("пустой ключ")
+                    return _error("empty key")
                 session.resolve(str(body.get("rid")), "secret", value)
             elif name == "permit":
                 decision = body.get("decision")
@@ -337,9 +337,9 @@ def make_app(bridge: Bridge) -> web.Application:
                 try:
                     pid = int(body.get("pid"))
                 except (TypeError, ValueError):
-                    return _error("pid — число")  # i18n: internal
+                    return _error("pid must be a number")
                 if not session.client or not await bg_kill(session.client, pid):
-                    return _error("такой фоновой команды у сессии нет")  # i18n: internal
+                    return _error("no such background command in this session")
                 session._event({"kind": "note", "code": "bg_killed", "text": str(body.get("cmd") or "")[:200]})
             elif name == "stop":
                 await session.stop()
@@ -350,7 +350,7 @@ def make_app(bridge: Bridge) -> web.Application:
             elif name == "rename":
                 title = " ".join(str(body.get("title") or "").split())[:120]
                 if not title:
-                    return _error("пустое название")
+                    return _error("empty title")
                 if body.get("if_title") is None or session.row["title"] == str(body["if_title"]):
                     bridge.update(session.id, title=title)
             elif name == "settings":
@@ -375,7 +375,7 @@ def make_app(bridge: Bridge) -> web.Application:
         session = _session(request)
         data = await request.read()
         if not data:
-            return _error("пустой файл")
+            return _error("empty file")
         try:
             info = await asyncio.to_thread(bridge.save_file, session.id, request.query.get("name") or "file", data)
         except BridgeError as e:
@@ -451,7 +451,7 @@ async def main() -> None:
     site = web.UnixSite(runner, SOCKET)
     await site.start()
     os.chmod(SOCKET, 0o666)         # папка run/ видна только контейнерам сайта; там процессы от root
-    log.info("listening on %s%s", SOCKET, "" if TOKEN else " — БЕЗ ТОКЕНА (CLAUDE_BRIDGE_TOKEN не задан)")
+    log.info("listening on %s%s", SOCKET, "" if TOKEN else " — NO TOKEN (CLAUDE_BRIDGE_TOKEN is not set)")
     sweeper = asyncio.create_task(bridge.sweep())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

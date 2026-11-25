@@ -90,9 +90,9 @@ def _extra_folders() -> tuple[str, ...]:
 
 def home_card() -> dict:
     """«Без проекта» — вся машина: домашняя папка."""
-    return {"id": "server", "name": (extension.attr("HOME_NAME") if _host_mode() else None) or "Домашняя папка",
+    return {"id": "server", "name": (extension.attr("HOME_NAME") if _host_mode() else None) or "Home folder",
             "path": HOME,
-            "branch": None, "subject": "Без проекта — вся машина", "when": None, "dirty": 0}
+            "branch": None, "subject": "No project — the whole machine", "when": None, "dirty": 0}
 
 
 def _git(path: str, *args: str) -> str:

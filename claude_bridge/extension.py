@@ -46,13 +46,13 @@ def load(host_dir: str | None = None):
         _mod = importlib.import_module("claude_bridge.host")
     except ModuleNotFoundError as e:
         if e.name != "claude_bridge.host":
-            log.exception("расширение моста не загрузилось")
+            log.exception("bridge extension failed to load")
         _mod = None
     except Exception:  # noqa: BLE001 — сломанное расширение не должно ронять мост
-        log.exception("расширение моста не загрузилось")
+        log.exception("bridge extension failed to load")
         _mod = None
     if _mod is not None:
-        log.info("расширение моста: %s", getattr(_mod, "__file__", "?"))
+        log.info("bridge extension: %s", getattr(_mod, "__file__", "?"))
     return _mod
 
 

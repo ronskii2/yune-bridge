@@ -241,7 +241,7 @@ def restart() -> None:
     дружит с пробелами в пути (C:\\Users\\Имя Фамилия)."""
     os.chdir(APP)
     args = [sys.executable, "-m", "claude_bridge.remote", "run"]
-    log.info("мост обновлён — перезапуск")
+    log.info("bridge updated — restarting")
     if os.name == "nt":
         import subprocess
         subprocess.Popen(args, cwd=APP, close_fds=True,

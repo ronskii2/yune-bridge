@@ -47,7 +47,7 @@ class Awake:
             elif want:
                 cmd = self._command()
                 if not cmd:
-                    log.info("не давать машине уснуть нечем (нет caffeinate / systemd-inhibit)")
+                    log.info("nothing to keep the machine awake (no caffeinate / systemd-inhibit)")
                 else:
                     self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                                  stderr=subprocess.DEVNULL)
@@ -59,9 +59,9 @@ class Awake:
                     self.proc.kill()
                 self.proc = None
             self.on = want
-            log.info("машина %s", "не уснёт, пока идёт сессия" if want else "снова может уснуть")
+            log.info("machine %s", "stays awake while a session runs" if want else "may sleep again")
         except Exception as e:  # noqa: BLE001
-            log.warning("не давать уснуть: %s", e)
+            log.warning("keep awake: %s", e)
 
 
 async def watch(bridge) -> None:

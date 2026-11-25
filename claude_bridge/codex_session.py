@@ -34,20 +34,21 @@ from .sessions import BridgeError, Session, _trim, TRIM_RESULT, resets_from_text
 
 log = logging.getLogger("claude_bridge")
 
-PREAMBLE = """[Сессия идёт с сайта владельца (раздел «Подключения»): он видит твои ответы и шаги в ленте, часто говорит
-голосом — текст распознан автоматически, возможны ошибки распознавания, понимай по смыслу. Ключи и пароли не проси
-прислать текстом — скажи, в какой env-файл и под каким именем их положить. Файлы, которые прислал владелец, лежат по
-путям из сообщения.]
+PREAMBLE = """[The session runs from the owner's website: they see your replies and steps in the feed and often speak
+by voice — the text is transcribed automatically and may contain recognition errors; understand by meaning. Never ask
+for keys or passwords as plain text — tell the owner which env file and variable name to put them in. Files the owner
+sent are at the paths given in the message.]
 
 """
 STOP_GRACE = 5
-STOPPED = "Остановлено"
-NO_MODEL = "нет такой модели"
+STOPPED = "Stopped"
+STOP_NOTE = {"kind": "note", "code": "stopped", "text": STOPPED}   # заметка «остановлено» — сайт переводит по code
+NO_MODEL = "no such model"
 
 
 def note_next(name: str) -> dict:
     """Заметка в ленте: со следующего хода — эта модель (общая для Codex, Gemini и агентов ACP)."""
-    return {"kind": "note", "text": f"Дальше: {name}"}
+    return {"kind": "note", "code": "next", "what": name, "text": f"Next: {name}"}
 # Режим доступа → флаги хода. approval_policy never: в exec подтверждать некому — что песочница не пускает, просто не выходит
 ACCESS_ARGS = {
     "full": ["--dangerously-bypass-approvals-and-sandbox"],
@@ -59,11 +60,11 @@ ACCESS_ARGS = {
              "-c", "sandbox_workspace_write.network_access=true"],
 }
 ACCESS_NOTE = {  # i18n: model
-    "full": "[Режим доступа сессии: полный — без песочницы.]",
-    "ask": "[Режим доступа сессии: песочница — правки только в папке проекта, сеть закрыта.]",
-    "read": "[Режим доступа сессии: только чтение — песочница не даст менять файлы; читай, ищи, объясняй и предлагай "
-            "правки текстом.]",
-    "auto": "[Режим доступа сессии: авто — правки только в папке проекта, сеть открыта.]",
+    "full": "[Session access mode: full — no sandbox.]",
+    "ask": "[Session access mode: sandbox — edits only inside the project folder, network closed.]",
+    "read": "[Session access mode: read-only — the sandbox won't allow changing files; read, search, explain and "
+            "suggest edits as text.]",
+    "auto": "[Session access mode: auto — edits only inside the project folder, network open.]",
 }
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
@@ -276,7 +277,7 @@ class CodexSession(Session):
                             {"todos": [{"content": t.get("text") or "", "status": "completed" if t.get("completed")
                                         else "pending"} for t in item.get("items") or []]})
         elif typ == "error":
-            self._event({"kind": "note", "text": (item.get("message") or "Ошибка")[:500]})
+            self._event({"kind": "note", "code": "agent_error", "text": (item.get("message") or "Error")[:500]})
 
     def _tool_once(self, tid: str, name: str, inp: dict) -> None:
         if tid in self.seen:
@@ -303,7 +304,7 @@ class CodexSession(Session):
                 os.killpg(proc.pid, signal.SIGINT)
         except (OSError, ProcessLookupError):
             return
-        self._event({"kind": "note", "text": STOPPED})
+        self._event(dict(STOP_NOTE))
         try:
             await asyncio.wait_for(proc.wait(), STOP_GRACE)
         except asyncio.TimeoutError:
@@ -332,7 +333,7 @@ class CodexSession(Session):
         target = changes.get("model", self.row["model"])
         if effort and self.has_effort and effort != self.row["effort"]:
             if not agents.valid_effort(self.agent_id, target, effort):
-                raise BridgeError("нет такого уровня")
+                raise BridgeError("no such level")
             changes["effort"] = effort
         elif self.row["effort"] and "model" in changes and not agents.valid_effort(self.agent_id, target, self.row["effort"]):
             changes["effort"] = ""          # у новой модели такого уровня нет — Codex возьмёт её собственный

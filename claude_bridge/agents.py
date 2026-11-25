@@ -92,7 +92,7 @@ def _acp_cli(agent: str) -> str:
                 "/opt/homebrew/bin/" + name, "/usr/local/bin/" + name)
 LOGIN_TTL = 15 * 60
 
-API_KEY = "ключ API"
+API_KEY = "API key"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
@@ -184,7 +184,7 @@ async def claude_probe() -> None:
         await asyncio.wait_for(client.connect(), PROBE_TIMEOUT)
         remember_claude(((await client.get_server_info()) or {}).get("models") or [])
     except Exception as e:  # noqa: BLE001
-        log.info("claude: список моделей: %s", e)
+        log.info("claude: model list: %s", e)
     finally:
         try:
             await client.disconnect()
@@ -361,9 +361,9 @@ def gemini_prepare_login() -> None:
     except FileNotFoundError:
         data = {}
     except (OSError, ValueError):
-        raise AgentError("Не разобрала ~/.gemini/settings.json — войдите в терминале: gemini")
+        raise AgentError("Couldn't read ~/.gemini/settings.json — sign in in the terminal: gemini")
     if not isinstance(data, dict):
-        raise AgentError("Не разобрала ~/.gemini/settings.json — войдите в терминале: gemini")
+        raise AgentError("Couldn't read ~/.gemini/settings.json — sign in in the terminal: gemini")
     auth = data.setdefault("security", {}).setdefault("auth", {})
     if auth.get("selectedType"):
         return
@@ -428,7 +428,7 @@ async def update(agent: str) -> dict:
     _status.pop(agent, None)
     after = (await status(agent, fresh=True)).get("version")
     if code != 0:
-        log.warning("update %s: код %s: %s", agent, code, out[-400:])
+        log.warning("update %s: exit %s: %s", agent, code, out[-400:])
         raise UpdateError("failed")
     log.info("update %s: %s → %s", agent, before, after)
     return {"agent": agent, "before": before, "after": after}
@@ -457,7 +457,7 @@ async def status(agent: str, fresh: bool = False) -> dict:
             except ValueError:
                 data = {}
             info["logged_in"] = bool(data.get("loggedIn"))
-            info["account"] = {"claude.ai": "подписка Claude", "console": "Anthropic Console"}.get(
+            info["account"] = {"claude.ai": "Claude subscription", "console": "Anthropic Console"}.get(
                 data.get("authMethod") or "", data.get("authMethod") or "")
         elif info["installed"] and agent == "gemini":
             info["logged_in"], info["account"] = gemini_login_state()
@@ -475,7 +475,7 @@ async def status(agent: str, fresh: bool = False) -> dict:
         elif info["installed"]:
             code, out = await _run(cli, "login", "status")
             info["logged_in"] = code == 0 and "logged in" in out.lower() and "not logged" not in out.lower()
-            info["account"] = ("подписка ChatGPT" if "chatgpt" in out.lower()
+            info["account"] = ("ChatGPT subscription" if "chatgpt" in out.lower()
                                else API_KEY if "api key" in out.lower() else "")
         _status[agent] = (time.monotonic(), info)
         info = dict(info)
@@ -540,10 +540,10 @@ class Login:
         if self.active():
             return self.public()
         if pty is None or self.agent not in SITE_LOGIN:
-            raise AgentError("На этой машине войдите в терминале: " + {"claude": "claude auth login", "codex": "codex login --device-auth", "pi": "pi → /login"}.get(
+            raise AgentError("Sign in on this machine in the terminal: " + {"claude": "claude auth login", "codex": "codex login --device-auth", "pi": "pi → /login"}.get(
                 self.agent, (ACP.get(self.agent) or {}).get("login") or self.agent))
         if not force and (await status(self.agent, fresh=True))["logged_in"]:
-            raise AgentError("Уже вошли — войти заново можно только с подтверждением: текущий вход сотрётся")
+            raise AgentError("Already signed in — signing in again needs confirmation: the current sign-in will be erased")
         self.state, self.url, self.code, self.error, self.output = "starting", "", "", "", ""
         self.needs_code = self.agent in ("claude", "gemini", "antigravity")
         self.started = time.time()
@@ -580,7 +580,7 @@ class Login:
                                                              cwd=HOME, start_new_session=True)
         except OSError as e:
             os.close(master)
-            self.state, self.error = "failed", f"Агент не запустился: {e}"
+            self.state, self.error = "failed", f"The agent didn't start: {e}"
             if self.agent == "gemini" and os.path.exists(GEMINI_CREDS + ".bak") and not os.path.exists(GEMINI_CREDS):
                 os.replace(GEMINI_CREDS + ".bak", GEMINI_CREDS)
             return self.public()
@@ -593,7 +593,7 @@ class Login:
                 break
             await asyncio.sleep(0.25)
         if self.active() and not self.url:
-            self.error = "Агент не показал ссылку для входа"
+            self.error = "The agent didn't show a sign-in link"
             await self.cancel(failed=True)
         return self.public()
 
@@ -616,7 +616,7 @@ class Login:
             while True:
                 left = self.started + LOGIN_TTL - time.time()
                 if left <= 0:
-                    self.error = "Время входа вышло"
+                    self.error = "Sign-in timed out"
                     break
                 try:
                     data = await asyncio.wait_for(queue.get(), left)
@@ -646,7 +646,7 @@ class Login:
                 self.state = "done" if ok else "failed"
                 if not ok and not self.error:
                     tail = [ln for ln in ANSI.sub("", self.output).splitlines() if ln.strip()][-1:]
-                    self.error = (tail[0].strip() if tail else "Вход не завершился")[:300]
+                    self.error = (tail[0].strip() if tail else "Sign-in didn't finish")[:300]
             bak = GEMINI_CREDS + ".bak"
             if self.agent == "gemini" and os.path.exists(bak):
                 if os.path.exists(GEMINI_CREDS):
@@ -654,7 +654,7 @@ class Login:
                 else:
                     os.replace(bak, GEMINI_CREDS)           # новый вход не случился — прежний на место
                     _status.pop("gemini", None)
-            log.info("вход в %s: %s", self.agent, self.state)
+            log.info("sign-in to %s: %s", self.agent, self.state)
 
     async def _gemini_creds(self) -> None:
         """Gemini CLI после кода не выходит, а открывает свой экран: вход записан (oauth_creds.json новее старта) —
@@ -713,9 +713,9 @@ class Login:
         """Claude Code, Gemini CLI и Antigravity: код со страницы входа → в pty процесса входа."""
         code = code.strip()
         if self.agent not in ("claude", "gemini", "antigravity") or self.state != "waiting":
-            raise AgentError("Этот вход кода не ждёт")
+            raise AgentError("This sign-in isn't waiting for a code")
         if not code or len(code) > 400 or any(ch in code for ch in "\r\n"):
-            raise AgentError("Вставьте код со страницы входа")
+            raise AgentError("Paste the code from the sign-in page")
         os.write(self.fd, code.encode() + b"\r")
         self.state = "code_sent"
         return self.public()
@@ -743,5 +743,5 @@ LOGINS: dict[str, Login] = {a: Login(a) for a in NAMES}
 
 def login(agent: str) -> Login:
     if agent not in LOGINS:
-        raise AgentError("нет такого агента")
+        raise AgentError("no such agent")
     return LOGINS[agent]

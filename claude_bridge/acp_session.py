@@ -176,7 +176,7 @@ class AcpSession(Session):
         self.turn_started = time.monotonic()
         self._set_status("running")
         res = await self.proc.call("session/prompt", {"sessionId": self.sid, "prompt": [{"type": "text", "text": text}]})
-        self._flush()
+        self._flush_text()
         reason = str(res.get("stopReason") or "end_turn")
         failed = reason in ("refusal", "error")
         if reason == "refusal":
@@ -201,7 +201,7 @@ class AcpSession(Session):
             code = "auth" if start and acp.is_auth_error(Exception(text)) else "start" if start else "acp"
             self._event({"kind": "error", "code": code, "text": text[:600]})
 
-    def _flush(self) -> None:
+    def _flush_text(self) -> None:   # не _flush: то имя у Session — отправка сообщения агенту
         if self.buf.strip():
             self._event({"kind": "text", "text": self.buf.strip()})
         self.buf, self.live, self.live_at = "", "", 0
@@ -219,7 +219,7 @@ class AcpSession(Session):
             if content.get("type") == "text":
                 self._delta(str(content.get("text") or ""))
         elif kind == "tool_call":
-            self._flush()
+            self._flush_text()
             self._tool(u, new=True)
         elif kind == "tool_call_update":
             self._tool(u, new=False)
@@ -316,7 +316,7 @@ class AcpSession(Session):
         tid = str(call.get("toolCallId") or "")
         if tid and tid not in self.seen:
             self.seen.add(tid)
-            self._flush()
+            self._flush_text()
             self._event({"kind": "tool", "tid": tid, "name": name, "input": _trim(inp)})
         rid = tid or uuid.uuid4().hex[:12]
         self._event({"kind": "permission", "rid": rid, "name": name, "input": _trim(inp, 1500), "agent_id": None})

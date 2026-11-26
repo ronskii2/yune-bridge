@@ -184,7 +184,7 @@ class PiSession(Session):
         if not self.turn:
             return
         self.turn = False
-        self._flush()
+        self._flush_text()
         self._event({"kind": "result", "cost": 0, "ms": int((time.monotonic() - self.turn_started) * 1000),
                      "turns": len(self.seen), "error": error or self.turn_failed})
         self._set_status("idle")
@@ -209,7 +209,7 @@ class PiSession(Session):
                 agents.note_login("pi", False)
             self._event({"kind": "error", "code": code, "text": text[:600]})
 
-    def _flush(self) -> None:
+    def _flush_text(self) -> None:   # не _flush: то имя у Session — отправка сообщения агенту
         if self.buf.strip():
             self._event({"kind": "text", "text": self.buf.strip()})
         self.buf, self.live, self.live_at = "", "", 0
@@ -248,11 +248,11 @@ class PiSession(Session):
         elif kind == "message_end":
             m = msg.get("message") or {}
             if m.get("role") == "assistant":
-                self._flush()
+                self._flush_text()
                 if m.get("stopReason") == "error" and m.get("errorMessage"):
                     self._error(str(m["errorMessage"]))
         elif kind == "tool_execution_start":
-            self._flush()
+            self._flush_text()
             tid = str(msg.get("toolCallId") or "")
             if tid and tid not in self.seen:
                 self.seen.add(tid)
@@ -296,7 +296,7 @@ class PiSession(Session):
         except ValueError:
             inp = {"input": raw}
         name = TOOL_NAMES.get(tool, tool)
-        self._flush()
+        self._flush_text()
         self._event({"kind": "permission", "rid": rid, "name": name, "input": _trim(inp if isinstance(inp, dict) else {}, 1500),
                      "agent_id": None})
         answer = await self._wait(rid, "permission")

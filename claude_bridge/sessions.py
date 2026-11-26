@@ -62,6 +62,7 @@ OpenCode, Cursor и другие (agents.ACP, acp_session.AcpSession) — та �
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import mimetypes
@@ -412,6 +413,8 @@ class Session:
         self.auto_resume = False            # ход запущен автопродолжением: снова лимит — ждём следующего окна
         self.limit_reset: float | None = None
         self.access_told: str | None = None     # режим доступа, о котором агент уже знает в этом процессе моста
+        self.shells: dict[str, dict] = {}       # «!» с сайта: идущие команды владельца (shid → процесс)
+        self.shell_ctx: list[dict] = []         # их итоги — агенту вместе со следующим сообщением владельца
 
     steer = True                            # сообщение посреди хода агент берёт на следующем шаге (у Codex — нет)
     access_notes = ACCESS_NOTE              # о режиме доступа — агенту (у Codex — про песочницу)
@@ -437,6 +440,7 @@ class Session:
                 "resume_at": r.get("resume_at"), "steer": self.steer,
                 # режим доступа: поле есть — мост умеет режимы (сайт показывает значок под полем; старые мосты — без него)
                 "access": self.access, "access_modes": list(self.access_modes),
+                "shell": True,                  # мост умеет «!» — команду владельца в терминале (shell); старые — без поля
                 # права агента (rules.py): есть — сессия идёт от агента Yune, мост проверяет каждое действие
                 "rules": self.rules}
 
@@ -1110,7 +1114,7 @@ class Session:
             text = (text or "Look at the files.") + "\n\nFiles from the owner:\n" + "\n".join(
                 f"- {f['path']} ({f['name']}, {f['mime']})" for f in files)
             images = [f["path"] for f in files if f["mime"].startswith("image/")]
-        text = "\n\n".join(p for p in [lead, text] if p)
+        text = "\n\n".join(p for p in [lead, self._shell_note(), text] if p)
         text = self._with_intro(text) + self._answer_note(answer) + self._access_note()
         self._live({"kind": "session", "session": self.public()})
         await self._submit(text, images)
@@ -1163,6 +1167,127 @@ class Session:
             raise BridgeError("compact: Claude Code, idle only")     # сайт кнопку иначе не показывает
         self.turn_failed = self.stopped = False
         await self._submit("/compact", [])          # конец — событие compact_boundary («Контекст сжат») и итог хода
+
+    # ── «!» в поле сайта: команда владельца в терминале машины (как «!» в Claude Code; владелец 26.11.2026) ──────────
+    # Выполняет мост, не агент: в папке сессии, от пользователя моста, оболочкой входа (zsh/bash; Windows — PowerShell),
+    # без ввода с клавиатуры. В ленту — событие shell (команда), по ходу — живые куски вывода shell_out, в конце — shell_end
+    # с выводом и кодом выхода. Итог агент получит со следующим сообщением владельца (_shell_note) — отдельного хода нет.
+    # Режим доступа не ограничивает: он про агента, а это рука владельца
+    SHELL_TIMEOUT = 600                     # сек: дольше — останавливаем
+    SHELL_KEEP = 60000                      # знаков вывода в ленте (длиннее — начало и конец)
+    SHELL_AGENT = 30000                     # знаков вывода агенту
+
+    async def shell(self, cmd: str) -> str:
+        cmd = cmd.strip()
+        if not cmd:
+            raise BridgeError("empty command")
+        if len(self.shells) >= 3:
+            raise BridgeError("three commands are already running in this session")
+        shid = uuid.uuid4().hex[:10]
+        self.last_active = time.monotonic()
+        if self.row.get("snoozed"):
+            self.bridge.update(self.id, snoozed=0)
+        if not self.row["title"]:
+            self.bridge.update(self.id, title=("! " + " ".join(cmd.split()))[:70])
+        self._event({"kind": "shell", "shid": shid, "cmd": cmd[:8000]})
+        self.shells[shid] = {"proc": None, "stopped": False}
+        asyncio.create_task(self._shell_run(shid, cmd))
+        return shid
+
+    @staticmethod
+    def _shell_argv(cmd: str) -> list[str]:
+        if os.name == "nt":                 # вывод PowerShell — в UTF-8 (японская Windows иначе отдаёт cp932)
+            return ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + cmd]
+        sh = os.environ.get("SHELL")
+        if not sh:
+            try:
+                import pwd
+                sh = pwd.getpwuid(os.getuid()).pw_shell
+            except Exception:  # noqa: BLE001
+                sh = None
+        return [sh or "/bin/sh", "-lc", cmd]
+
+    async def _shell_run(self, shid: str, cmd: str) -> None:
+        out: list[str] = []
+        size, t0, code, timeout = 0, time.monotonic(), None, False
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self._shell_argv(cmd), cwd=self.row["cwd"], stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=os.name != "nt")
+            self.shells[shid]["proc"] = proc
+
+            async def pump() -> None:
+                nonlocal size
+                while True:
+                    chunk = await proc.stdout.read(8192)
+                    if not chunk:
+                        break
+                    text = dec.decode(chunk)
+                    out.append(text)
+                    size += len(text)
+                    if size <= self.SHELL_KEEP and text:
+                        self._live({"kind": "shell_out", "shid": shid, "text": text})
+            try:
+                await asyncio.wait_for(pump(), timeout=self.SHELL_TIMEOUT)
+            except asyncio.TimeoutError:
+                timeout = True
+                self._shell_kill(proc)
+            code = await proc.wait()
+        except Exception as e:  # noqa: BLE001
+            out.append(f"\n{type(e).__name__}: {e}")
+            code = -1
+        tail = dec.decode(b"", final=True)
+        if tail:
+            out.append(tail)
+        full = "".join(out)
+        keep = full if len(full) <= self.SHELL_KEEP else full[:10000] + "\n…\n" + full[-(self.SHELL_KEEP - 10000):]
+        stopped = self.shells.get(shid, {}).get("stopped", False)
+        self.shells.pop(shid, None)
+        self._event({"kind": "shell_end", "shid": shid, "code": code, "out": keep, "secs": round(time.monotonic() - t0, 1),
+                     "stopped": stopped or None, "timeout": timeout or None})
+        agent_out = full if len(full) <= self.SHELL_AGENT else "…\n" + full[-self.SHELL_AGENT:]
+        self.shell_ctx.append({"cmd": cmd, "out": agent_out, "code": code, "stopped": stopped or timeout})
+
+    @staticmethod
+    def _shell_kill(proc) -> None:
+        try:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    async def shell_stop(self, shid: str) -> None:
+        sh = self.shells.get(shid)
+        if not sh or not sh.get("proc"):
+            raise BridgeError("no such command running")
+        sh["stopped"] = True
+        proc = sh["proc"]
+        self._shell_kill(proc)
+        try:                                # не ушла за 3 с — добить
+            await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=3)
+        except asyncio.TimeoutError:
+            try:
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    def _shell_note(self) -> str:
+        """Команды владельца с прошлого сообщения — агенту, как «!» в Claude Code (bash-input / bash-stdout)."""
+        if not self.shell_ctx:
+            return ""
+        parts = ["The owner ran these commands in the session's terminal themselves (output for your context):"]
+        for c in self.shell_ctx:
+            note = " (stopped)" if c["stopped"] else f" (exit code {c['code']})" if c["code"] else ""
+            parts.append(f"<bash-input>{c['cmd']}</bash-input>{note}\n<bash-stdout>{c['out'].rstrip()}</bash-stdout>")
+        self.shell_ctx = []
+        return "\n".join(parts)
 
     async def stop(self) -> None:
         self.stopped = True

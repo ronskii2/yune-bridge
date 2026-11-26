@@ -368,6 +368,10 @@ def make_app(bridge: Bridge) -> web.Application:
                 await session.stop()
             elif name == "compact":
                 await session.compact()
+            elif name == "shell":                # «!» в поле сайта — команда владельца в терминале машины
+                return _json({"ok": True, "shid": await session.shell(str(body.get("cmd") or "")[:8000])})
+            elif name == "shellstop":
+                await session.shell_stop(str(body.get("shid") or ""))
             elif name == "snooze":
                 bridge.update(session.id, snoozed=1 if body.get("on") else 0)
             elif name == "rename":

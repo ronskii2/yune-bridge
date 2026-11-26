@@ -18,10 +18,12 @@ WebSocket моста; на машине, где работает сам сайт
   GET  /security?fresh=1             инвентарь для проверки безопасности: обновления, образы, сокеты (security.py)
   GET  /registry?fresh=1             агенты проектов: реестр .yune/agents.json, вызовы ИИ в коде, расписание (registry.py)
   GET  /projects                     проекты для новой сессии
+  GET  /branches?project=            ветки git проекта: {current, branches: [{name, when, current, worktree}]}
   GET  /dirs?path=                   подпапки (окно «Другая папка»)
   POST /folders                      {path} — папку в проекты
   GET  /sessions                     список сессий
-  POST /sessions                     {project, agent?, model?, effort?, access?, rules?} → сессия; rules — права
+  POST /sessions                     {project, agent?, model?, effort?, access?, rules?, branch?, branch_new?} → сессия;
+                                     branch — другая или новая (branch_new) ветка: сессия в своём git worktree; rules — права
                                      агента Yune (rules.py), мост проверяет каждое действие
   GET  /sessions/{id}?before=&limit= сессия + события
   POST /sessions/{id}/send           {text, files?: [fid], answer?: {mode, rules, short}, mode?: auto | now | later}
@@ -205,6 +207,12 @@ def make_app(bridge: Bridge) -> web.Application:
             return _error(str(e))
         return _json({"ok": True, "login": state})
 
+    async def project_branches(request):
+        got = await asyncio.to_thread(projects.branches, request.query.get("project") or "")
+        if got is None:
+            return _error("no such project")
+        return _json({"ok": True, **got})
+
     async def project_list(request):
         return _json({"ok": True, "projects": await asyncio.to_thread(projects.listing)})
 
@@ -273,9 +281,16 @@ def make_app(bridge: Bridge) -> web.Application:
             card = await asyncio.to_thread(projects.resolve, project)
             if not card:
                 raise BridgeError("no such project")
+            branch, tree = str(body.get("branch") or "").strip() or None, None
+            if branch:                          # другая или новая ветка — своя папка worktree; git — не в цикле событий
+                try:
+                    tree = await asyncio.to_thread(projects.branch_dir, project, branch, bool(body.get("branch_new")))
+                except ValueError as e:
+                    raise BridgeError(str(e)) from None
             session = bridge.create(project, body.get("model"), body.get("effort"), str(body.get("agent") or "claude"),
                                     intro=device_note(body.get("device")), access=body.get("access"),
-                                    rules=body.get("rules") if isinstance(body.get("rules"), dict) else None)
+                                    rules=body.get("rules") if isinstance(body.get("rules"), dict) else None,
+                                    branch=branch, cwd=tree)
         except BridgeError as e:
             return _error(str(e))
         return _json({"ok": True, "session": session.public()})
@@ -439,6 +454,7 @@ def make_app(bridge: Bridge) -> web.Application:
     r.add_get("/registry", registry_get)
     r.add_route("*", "/agents/{agent:[a-z]+}/login", agent_login)
     r.add_get("/projects", project_list)
+    r.add_get("/branches", project_branches)
     r.add_get("/projects/icon", project_icon)
     r.add_post("/projects/icon", project_icon_set)
     r.add_get("/dirs", dir_list)

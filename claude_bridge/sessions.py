@@ -238,7 +238,9 @@ COLUMNS = {"agent": "TEXT NOT NULL DEFAULT 'claude'", "intro": "TEXT", "origin":
            # жизни (подписка — час, ключ API и докупка сверх лимита — 5 минут) и размер контекста в токенах
            "cache_at": "REAL", "cache_ttl": "INTEGER", "ctx_tokens": "INTEGER",
            # «Отложить» на сайте (задачи): автосжатие такую не трогает — владелец к ней пока не вернётся
-           "snoozed": "INTEGER NOT NULL DEFAULT 0"}
+           "snoozed": "INTEGER NOT NULL DEFAULT 0",
+           # ветка сессии в отдельном worktree (сайт: другая или новая ветка в черновике); NULL — папка проекта как есть
+           "branch": "TEXT"}
 
 
 class BridgeError(Exception):
@@ -422,6 +424,7 @@ class Session:
         # пустое название — пустым: подпись «Новая сессия» ставит сайт на языке витрины
         return {"id": r["id"], "title": r["title"] or "", "project": r["project"],
                 "project_name": r["project_name"], "cwd": r["cwd"], "model": r["model"], "effort": r["effort"],
+                "branch": r.get("branch"),
                 "agent": r.get("agent") or "claude", "origin": r.get("origin"),
                 "created": r["created"], "updated": r["updated"], "context": r["context"], "cost": r["cost"],
                 "cache_at": r.get("cache_at"), "cache_ttl": r.get("cache_ttl"), "ctx_tokens": r.get("ctx_tokens"),
@@ -516,6 +519,10 @@ class Session:
                            "agent_run) instead of starting a new one"},
             "title": {"type": "string", "description": "Short title of the delegated session, in the owner's language"},
             "model": {"type": "string", "description": "Model id of that agent; empty — its default"},
+            "branch": {"type": "string", "description": "Git branch for the delegated session. Empty — your folder and "
+                       "branch. An existing branch — it works in its own git worktree of that branch (your folder is not "
+                       "touched). With new_branch — a new branch from your current HEAD, in its own worktree"},
+            "new_branch": {"type": "boolean", "description": "Create `branch` as a new branch (\"do it in a new branch\")"},
             "wait": {"type": "boolean", "description": "Wait for the answer (default true). false — return the session "
                      "id at once; collect the answer later with agent_result"},
             "timeout_minutes": {"type": "number", "description": "How long to wait, 1–120 (default 30); still running "
@@ -556,6 +563,8 @@ class Session:
 
         def report(child, got: dict) -> dict:
             name = agents.NAMES.get(child.row.get("agent") or "", "agent")
+            if child.row.get("branch") and child.row.get("branch") != self.row.get("branch"):   # где его правки
+                name += f" (branch {child.row['branch']}, folder {child.row['cwd']})"
             if not got["done"]:
                 return text(f"{name} is still working (session {child.id}). Call agent_result with this session_id later.")
             if got["error"] and not got["answer"]:
@@ -566,7 +575,8 @@ class Session:
         @tool("agent_run", "Delegate a task to another coding agent on this machine (Codex, Gemini/Antigravity, OpenCode, "
               "another Claude Code…) in the same project, like sub-agents in T3 Code. The bridge opens a separate session "
               "of that agent (the owner sees it on the site), sends the prompt, waits for the end of its turn and returns "
-              "its final answer. Several calls in parallel run in parallel.", run_schema)
+              "its final answer. Several calls in parallel run in parallel. branch / new_branch — run it on another or a "
+              "new git branch in its own worktree (\"do it in a new branch\").", run_schema)
         async def agent_run(args):
             prompt = str(args.get("prompt") or "").strip()
             if not prompt:
@@ -580,8 +590,17 @@ class Session:
                     agent = str(args.get("agent") or "")
                     if agent not in agents.NAMES:
                         return text("Unknown agent; one of: " + ", ".join(agents.NAMES), True)
+                    # своя ветка — своя папка worktree (новая — от HEAD этой сессии); без ветки — в той же папке
+                    branch, tree = str(args.get("branch") or "").strip() or None, None
+                    if branch:
+                        try:
+                            tree = await asyncio.to_thread(projects.branch_dir, self.row["project"], branch,
+                                                           bool(args.get("new_branch")), self.row["cwd"])
+                        except ValueError as e:
+                            return text(f"Not started: {e}", True)
                     child = self.bridge.create(self.row["project"], str(args.get("model") or "") or None, None, agent,
-                                               origin="sub:" + self.id, access=self.access)
+                                               origin="sub:" + self.id, access=self.access,
+                                               branch=branch or self.row.get("branch"), cwd=tree or self.row["cwd"])
                     title = " ".join(str(args.get("title") or prompt).split())[:70]
                     self.bridge.update(child.id, title=title)
                     self.bridge.add_event(child.id, {"kind": "note", "code": "subtask_from", "to": self.id,
@@ -597,7 +616,8 @@ class Session:
                 log.exception("agent_run")
                 return text(f"Not started: {e}", True)
             if args.get("wait") is False:
-                return text(f"Started: session {child.id} ({agents.NAMES.get(child.row.get('agent') or '', '')}). "
+                where = f", branch {child.row['branch']} in {child.row['cwd']}" if child.row.get("branch") else ""
+                return text(f"Started: session {child.id} ({agents.NAMES.get(child.row.get('agent') or '', '')}{where}). "
                             "Collect the answer with agent_result.")
             return report(child, await wait_turn(child, mark, float(args.get("timeout_minutes") or 30)))
 
@@ -1315,10 +1335,12 @@ class Bridge:
 
     def create(self, project: str, model: str | None, effort: str | None, agent: str | None = None,
                intro: str | None = None, origin: str | None = None, access: str | None = None,
-               rules: dict | None = None) -> Session:
+               rules: dict | None = None, branch: str | None = None, cwd: str | None = None) -> Session:
+        """cwd — папка worktree ветки branch (projects.branch_dir, server.py); без неё — папка проекта."""
         card = projects.resolve(project)
         if not card:
             raise BridgeError("no such project")
+        cwd = cwd or card["path"]
         agent = agent or "claude"
         if agent not in agents.NAMES:
             raise BridgeError("no such agent")
@@ -1336,9 +1358,10 @@ class Bridge:
             intro = card["note"].strip() + "\n\n" + (intro or "")
         sid, now = uuid.uuid4().hex[:12], time.time()
         self.db.execute("INSERT INTO sessions (id, project, project_name, cwd, model, effort, created, updated, agent, "
-                        "intro, origin, access, rules) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (sid, card["id"], card["name"], card["path"], model, effort, now, now, agent, intro, origin,
-                         access, json.dumps(rules, ensure_ascii=False) if rules else None))
+                        "intro, origin, access, rules, branch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (sid, card["id"], card["name"], cwd, model, effort, now, now, agent, intro, origin,
+                         access, json.dumps(rules, ensure_ascii=False) if rules else None,
+                         branch.strip() if branch and cwd != card["path"] else None))
         session = self.get(sid)
         self.publish({"session": sid, "kind": "session", "session": session.public()})
         return session
@@ -1435,7 +1458,7 @@ class Bridge:
         parts.append("Command logs are not included — if you need them, check yourself (git status, git diff, git log).]\n\n"
                      "New message from the owner:\n")
         session = self.create(row["project"], model, effort, agent, intro="\n\n".join(parts), origin=sid,
-                              access=old.access)
+                              access=old.access, branch=row.get("branch"), cwd=row["cwd"])
         session_title = (row["title"] + " (2)") if row["title"] else ""
         self.update(session.id, title=session_title[:120])
         self.add_event(session.id, {"kind": "handoff", "from": sid, "from_title": row["title"] or "",

@@ -568,6 +568,87 @@ def add_folder(path: str) -> dict:
     return _card(real)
 
 
+# ── ветки (сайт, черновик сессии: «ветка» над полем) ─────────────────────────────────────────────────────────────
+# Текущая ветка проекта — сессия в самой папке, как всегда. Другая или новая ветка — отдельный git worktree: ветку в
+# папке проекта не переключаем, там могут идти другие сессии. Worktree — в данных моста (worktrees/<папка>-<хеш>/<ветка>)
+WORKTREES = os.path.join(os.environ.get("CLAUDE_BRIDGE_DATA") or os.path.join(HOME, ".yune-bridge"), "worktrees")
+
+
+def _worktrees(path: str) -> dict[str, str]:
+    """ветка → папка worktree, где она открыта (и сама папка проекта)."""
+    trees, cur = {}, None
+    for line in _git(path, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            cur = line[9:]
+        elif line.startswith("branch refs/heads/") and cur:
+            trees[line[18:]] = cur
+    return trees
+
+
+def branches(project: str) -> dict | None:
+    """Локальные ветки проекта, свежие первыми; current — ветка папки проекта. Чужой путь — None, не git — пусто."""
+    card = resolve(project)
+    if not card:
+        return None
+    path = card["path"]
+    if project == "server" or not _is_git(path):
+        return {"current": None, "branches": []}
+    current = _git(path, "rev-parse", "--abbrev-ref", "HEAD") or None
+    trees = _worktrees(path)
+    items = []
+    for line in _git(path, "for-each-ref", "--sort=-committerdate", "--count=200",
+                     "--format=%(refname:short)%00%(committerdate:unix)", "refs/heads").splitlines():
+        name, _, when = line.partition("\x00")
+        if name:
+            tree = trees.get(name)
+            items.append({"name": name, "when": int(when) if when.isdigit() else None, "current": name == current,
+                          "worktree": tree if tree and tree != path else None})
+    return {"current": current, "branches": items}
+
+
+def branch_dir(project: str, branch: str, new: bool = False, start: str | None = None) -> str:
+    """Папка для сессии на ветке: текущая ветка — папка проекта; ветка уже открыта в другом worktree — он; иначе новый
+    worktree (new — с новой веткой от текущей; start — папка, от чьего HEAD её вести: поручение из сессии в worktree —
+    от её ветки, а не от папки проекта). Ошибка — ValueError с английским текстом (сайт переводит)."""
+    card = resolve(project)
+    if not card or project == "server" or not _is_git(card["path"]):
+        raise ValueError("not a git project")
+    base, name = card["path"], (branch or "").strip()
+    try:
+        bad = not name or name.startswith("-") or subprocess.run(
+            ["git", "check-ref-format", "--branch", name], capture_output=True, timeout=5).returncode != 0
+    except (OSError, subprocess.SubprocessError):
+        bad = True
+    if bad:
+        raise ValueError("bad branch name")
+    exists = bool(_git(base, "rev-parse", "--verify", "--quiet", "refs/heads/" + name))
+    if new and exists:
+        raise ValueError("branch already exists")
+    if not new and not exists:
+        raise ValueError("no such branch")
+    if not new and name == _git(base, "rev-parse", "--abbrev-ref", "HEAD"):
+        return base
+    trees = _worktrees(base)
+    if not new and name in trees:
+        return trees[name]
+    folder = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(base.rstrip("/\\")) or "repo").strip("-.") or "repo"
+    root = os.path.join(WORKTREES, folder + "-" + hashlib.sha1(base.encode()).hexdigest()[:6])
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.") or "branch"
+    target, n = os.path.join(root, slug), 2
+    while os.path.exists(target):
+        target, n = os.path.join(root, f"{slug}-{n}"), n + 1
+    os.makedirs(root, exist_ok=True)
+    head = _git(start, "rev-parse", "HEAD") if new and start else ""
+    args = (["worktree", "add", "-b", name, target] + ([head] if head else [])) if new else ["worktree", "add", target, name]
+    try:
+        r = subprocess.run(["git", "-C", base, *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ValueError("git worktree failed: " + str(e)[:200]) from None
+    if r.returncode:
+        raise ValueError("git worktree failed: " + ((r.stderr or r.stdout).strip()[:300] or str(r.returncode)))
+    return target
+
+
 def resolve(project: str) -> dict | None:
     """id проекта из карточки → карточка; чужой путь не принимаем (только из списка)."""
     if project == "server":

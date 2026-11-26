@@ -152,7 +152,8 @@ def codex_context_window() -> int:
 # уровня нет; resolved (Claude Code resolvedModel) — какая модель на деле стоит за пунктом вроде «Default».
 # Пока агент списка не дал, список пуст и модель не передаём: агент берёт свою.
 _models: dict[str, list[dict]] = {}
-_current: dict[str, str] = {}           # модель, которую агент сам назвал текущей (ACP currentModelId)
+_current: dict[str, str] = {}           # модель, которую агент сам назвал текущей (ACP currentModelId / configOptions)
+_current_effort: dict[str, str] = {}    # уровень размышлений по умолчанию (ACP thought_level)
 
 
 def _model(mid, name=None, efforts=(), resolved=None) -> dict:
@@ -163,9 +164,12 @@ def _model(mid, name=None, efforts=(), resolved=None) -> dict:
     return out
 
 
-def remember_models(agent: str, found: list[dict], current: str = "") -> None:
+def remember_models(agent: str, found: list[dict], current: str = "", current_effort: str = "") -> None:
     if found:
         _models[agent] = found
+        _current_effort[agent] = current_effort
+    elif current_effort:
+        _current_effort[agent] = current_effort
     if current:
         _current[agent] = current
 
@@ -222,7 +226,9 @@ def defaults(agent: str) -> tuple[str, str]:
         except (OSError, ValueError, AttributeError):
             effort = ""
         return model, effort if effort in efforts(agent, model) else ""
-    return _current.get(agent, ""), ""
+    model = _current.get(agent, "")
+    effort = _current_effort.get(agent, "")
+    return model, effort if effort in efforts(agent, model) else ""
 
 
 # Порог автосжатия Claude Code (владелец 25.11.2026): настройка самого Claude Code autoCompactWindow в его settings.json —

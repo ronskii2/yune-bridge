@@ -152,31 +152,96 @@ def initialize_params() -> dict:
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}
 
 
-def models_of(result: dict) -> tuple[list[dict], str]:
-    """Модели из ответа session/new | session/load: ACP v1 `models {availableModels, currentModelId}` или
-    configOptions с category model. → ([{id, name, efforts}], текущая) — как дал агент."""
-    out, current = [], ""
+EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _available_models(result: dict) -> list[dict]:
     models = result.get("models") if isinstance(result.get("models"), dict) else None
-    if models:
-        current = str(models.get("currentModelId") or "")
-        for m in models.get("availableModels") or []:
-            if isinstance(m, dict) and m.get("modelId"):
-                out.append({"id": str(m["modelId"]), "name": str(m.get("name") or m["modelId"]), "efforts": []})
+    if not models:
+        return []
+    return [m for m in models.get("availableModels") or [] if isinstance(m, dict) and m.get("modelId")]
+
+
+def _config_option(result: dict, category: str) -> dict | None:
     for opt in result.get("configOptions") or []:
-        if isinstance(opt, dict) and opt.get("category") == "model" and not out:
-            current = str(opt.get("currentValue") or opt.get("value") or current)
-            for v in opt.get("options") or []:
-                if isinstance(v, dict) and (v.get("value") or v.get("id")):
-                    vid = str(v.get("value") or v.get("id"))
-                    out.append({"id": vid, "name": str(v.get("name") or vid), "efforts": []})
-    return out, current
+        if isinstance(opt, dict) and opt.get("category") == category:
+            return opt
+    return None
+
+
+def _option_values(opt: dict | None) -> list[str]:
+    if not opt:
+        return []
+    out = []
+    for v in opt.get("options") or []:
+        if isinstance(v, dict) and (v.get("value") or v.get("id")):
+            out.append(str(v.get("value") or v.get("id")))
+    return out
+
+
+def models_of(result: dict) -> tuple[list[dict], str, str]:
+    """Модели и уровни размышлений из ответа session/new | session/load → ([{id, name, efforts}], модель, уровень).
+
+    Если агент отдаёт configOptions с category "model" (как agy acp — отдельно модель и thought_level), берём
+    базовые модели оттуда, а доступные уровни каждой модели сверяем с models.availableModels (`<model>-<level>`),
+    чтобы модель и мышление выбирались раздельно и у моделей без мышления уровней не было.
+    Иначе — ACP v1 `models {availableModels, currentModelId}` без отдельных уровней."""
+    m_opt = _config_option(result, "model")
+    m_entries = [v for v in (m_opt.get("options") or []) if isinstance(v, dict) and (v.get("value") or v.get("id"))] if m_opt else []
+    if m_entries:
+        current = str(m_opt.get("currentValue") or m_opt.get("value") or "")
+        t_opt = _config_option(result, "thought_level")
+        cur_effort = str(t_opt.get("currentValue") or t_opt.get("value") or "") if t_opt else ""
+        t_levels = _option_values(t_opt)
+        avail_ids = {str(m["modelId"]) for m in _available_models(result)}
+        order = list(EFFORT_ORDER) + [lv for lv in t_levels if lv not in EFFORT_ORDER]
+        out = []
+        matched_any = False
+        for v in m_entries:
+            vid = str(v.get("value") or v.get("id"))
+            m_efforts = [lv for lv in order if f"{vid}-{lv}" in avail_ids] if avail_ids else list(t_levels)
+            if m_efforts and avail_ids:
+                matched_any = True
+            out.append({"id": vid, "name": str(v.get("name") or vid), "efforts": m_efforts})
+        # availableModels есть, но без суффиксов уровня — применяем общие уровни из thought_level ко всем моделям
+        if avail_ids and not matched_any and t_levels:
+            for item in out:
+                item["efforts"] = list(t_levels)
+        return out, current, cur_effort
+
+    out, current = [], ""
+    avail = _available_models(result)
+    if avail:
+        current = str((result.get("models") or {}).get("currentModelId") or "")
+        for m in avail:
+            out.append({"id": str(m["modelId"]), "name": str(m.get("name") or m["modelId"]), "efforts": []})
+    return out, current, ""
 
 
 def model_option_id(result: dict) -> str | None:
-    """id настройки модели в configOptions (для session/set_config_option), если агент даёт модели так."""
-    for opt in result.get("configOptions") or []:
-        if isinstance(opt, dict) and opt.get("category") == "model" and opt.get("id"):
-            return str(opt["id"])
+    """id настройки модели в configOptions (для session/set_config_option), когда models_of() брал модели оттуда."""
+    opt = _config_option(result, "model")
+    if opt and opt.get("id") and _option_values(opt):
+        return str(opt["id"])
+    return None
+
+
+def effort_option_id(result: dict) -> str | None:
+    """id настройки уровня размышлений в configOptions (category thought_level), если агент его отдаёт."""
+    opt = _config_option(result, "thought_level")
+    return str(opt["id"]) if opt and opt.get("id") else None
+
+
+def split_legacy_model(model: str, found: list[dict]) -> tuple[str, str] | None:
+    """Старый сохранённый ID с приклеенным уровнем (`gemini-4-neon-high`) → (`gemini-4-neon`, `high`), если в списке есть такая база."""
+    if not model or any(m["id"] == model for m in found):
+        return None
+    for m in found:
+        prefix = m["id"] + "-"
+        if model.startswith(prefix):
+            lv = model[len(prefix):]
+            if lv in (m.get("efforts") or ()):
+                return m["id"], lv
     return None
 
 

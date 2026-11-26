@@ -57,20 +57,136 @@ from . import agents, context, extension, limits, projects, registry, security
 from .sessions import DATA, Bridge, BridgeError, append_prompt, device_note
 
 
-async def open_local(cwd: str, path: str, reveal: bool = False) -> None:
-    """Открыть файл или папку из ленты сессии на этой машине — программой по умолчанию (macOS — open, Windows —
-    startfile, Linux — xdg-open); reveal — показать в Finder / Проводнике. Только внутри папки сессии (cwd): путь
-    раскрываем (realpath — без выхода по ссылкам и «..»). Машина без экрана (сервер) — ошибка: открывать некому."""
-    import sys
-    path = path.strip()
-    if not path or len(path) > 4096 or "\0" in path:
+def _under(path: str, base: str) -> bool:
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _strip_loc(path: str) -> str:
+    """Убрать file:// и суффикс номера строки (:12, :12:5, :12-30, #L12-L30)."""
+    import re
+    from urllib.parse import unquote
+    p = path.strip().strip("`'\"")
+    if p.lower().startswith("file://"):
+        p = unquote(p[7:])
+        if p.lower().startswith("localhost/"):
+            p = p[len("localhost"):]
+    p = re.sub(r"#L\d+(?:-L?\d+)?$", "", p)
+    p = re.sub(r":\d+(?::\d+|-\d+)?$", "", p)
+    return p
+
+
+def _find_in_tree(root: str, rel: str, max_depth: int = 6, max_entries: int = 15000) -> str | None:
+    """Найти относительный путь или имя файла внутри папки сессии (когда агент дал `app.js` или `src/app.js` без
+    верхней подпапки). Обход по уровням с ограничением глубины и числа записей, без .git/node_modules."""
+    import collections
+    want = os.path.normpath(rel.replace("\\", os.sep).replace("/", os.sep)).strip(os.sep)
+    if not want or want in (".", "..") or want.startswith(".." + os.sep):
+        return None
+    want_low = want.lower()
+    suffix = os.sep + want
+    suffix_low = os.sep + want_low
+    ci_hit = None
+    seen = 0
+    q: collections.deque[tuple[str, str, int]] = collections.deque([(root, "", 0)])
+    while q and seen < max_entries:
+        cur, pref, depth = q.popleft()
+        try:
+            with os.scandir(cur) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            seen += 1
+            if seen > max_entries:
+                break
+            name = entry.name
+            if name in projects.ICON_SKIP:
+                continue
+            r = name if not pref else pref + os.sep + name
+            if r == want or r.endswith(suffix):
+                return entry.path
+            if ci_hit is None and (r.lower() == want_low or r.lower().endswith(suffix_low)):
+                ci_hit = entry.path
+            if depth < max_depth:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        q.append((entry.path, r, depth + 1))
+                except OSError:
+                    pass
+    return ci_hit
+
+
+def _resolve_local(cwd: str, path: str) -> str:
+    """Найти существующий файл/папку в пределах папки сессии, домашней папки пользователя или временной папки:
+    агент часто даёт абсолютный путь в ~/Desktop или /tmp, путь с дублированием имени папки проекта (`bot/…` при cwd
+    `…/bot`) или короткий относительный путь внутри проекта."""
+    import tempfile
+    raw = path.strip()
+    if not raw or len(raw) > 4096 or "\0" in raw:
         raise BridgeError("no_path: empty path")
     root = os.path.realpath(cwd)
-    full = os.path.realpath(os.path.join(root, os.path.expanduser(path)))
-    if full != root and not full.startswith(root.rstrip(os.sep) + os.sep):
-        raise BridgeError("outside: path is outside the session folder")
-    if not os.path.exists(full):
-        raise BridgeError("missing: no such file")
+    home = os.path.realpath(os.path.expanduser("~"))
+    allowed = [root, home]
+    for tmp in ("/tmp", tempfile.gettempdir()):
+        if os.path.exists(tmp):
+            rt = os.path.realpath(tmp)
+            if rt not in allowed:
+                allowed.append(rt)
+
+    def ok(p: str) -> str | None:
+        rp = os.path.realpath(p)
+        if any(_under(rp, base) for base in allowed) and os.path.exists(rp):
+            return rp
+        return None
+
+    cleaned = _strip_loc(raw)
+    variants = [raw] + ([cleaned] if cleaned and cleaned != raw else [])
+    for item in variants:
+        expanded = os.path.expanduser(item)
+        if os.path.isabs(expanded):
+            hit = ok(expanded)
+            if hit:
+                return hit
+            rp = os.path.realpath(expanded)
+            if not any(_under(rp, base) for base in allowed):
+                raise BridgeError("outside: path is outside allowed folders")
+            continue
+        # 1) прямо от папки сессии
+        hit = ok(os.path.join(root, expanded))
+        if hit:
+            return hit
+        # 2) от предков папки сессии (до 4 уровней внутри домашней: `pkg/app.py` при cwd `…/repo/pkg` или соседний файл в репо)
+        anc = os.path.dirname(root)
+        for _ in range(4):
+            if not anc or anc == os.path.dirname(anc) or not any(_under(anc, base) for base in allowed):
+                break
+            hit = ok(os.path.join(anc, expanded))
+            if hit:
+                return hit
+            anc = os.path.dirname(anc)
+        # 3) от домашней папки (например `Desktop/file.pdf` без `~/`)
+        if home != root:
+            hit = ok(os.path.join(home, expanded))
+            if hit:
+                return hit
+        # 4) поиск по дереву папки сессии (короткий путь или имя файла без верхних подпапок)
+        found = _find_in_tree(root, expanded)
+        if found:
+            hit = ok(found)
+            if hit:
+                return hit
+    rp = os.path.realpath(os.path.join(root, os.path.expanduser(cleaned or raw)))
+    if not any(_under(rp, base) for base in allowed):
+        raise BridgeError("outside: path is outside allowed folders")
+    raise BridgeError("missing: no such file")
+
+
+async def open_local(cwd: str, path: str, reveal: bool = False) -> None:
+    """Открыть файл или папку из ленты сессии на этой машине — программой по умолчанию (macOS — open, Windows —
+    startfile, Linux — xdg-open); reveal — показать в Finder / Проводнике. В пределах папки сессии, домашней папки
+    или временной папки. Машина без экрана (сервер) — ошибка: открывать некому."""
+    import sys
+    full = await asyncio.to_thread(_resolve_local, cwd, path)
     if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         raise BridgeError("no_screen: this machine has no screen")
     if sys.platform == "win32":

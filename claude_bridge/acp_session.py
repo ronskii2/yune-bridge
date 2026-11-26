@@ -48,6 +48,7 @@ class AcpSession(Session):
         self.loading = False
         self.mcp_on = False
         self.model_option: str | None = None     # id настройки модели (configOptions), если агент даёт модели так
+        self.effort_option: str | None = None    # id настройки мышления (configOptions thought_level), если есть
         self.queue: list[str] = []
         self.buf = ""
         self.seen: set[str] = set()
@@ -115,22 +116,44 @@ class AcpSession(Session):
                 self.bridge.update(self.id, claude_id=self.sid)
         agents.note_login(self.agent, True)
         self.mcp_on = bool(mcp)
-        found, current = acp.models_of(result or {})
-        agents.remember_models(self.agent, found, current)
+        found, current, cur_effort = acp.models_of(result or {})
+        agents.remember_models(self.agent, found, current, cur_effort)
         self.model_option = acp.model_option_id(result or {})
-        model = self.row["model"]
+        self.effort_option = acp.effort_option_id(result or {})
+        model, effort = self.row["model"], self.row["effort"]
+        if self.model_option:
+            split = acp.split_legacy_model(model, found)
+            if split:
+                model, legacy_effort = split
+                effort = effort or legacy_effort
+                self.bridge.update(self.id, model=model, effort=effort)
+        model_changed = False
         if model and model != "default" and model != current:
             await self._set_model(model)
+            model_changed = True
+        if effort and self.effort_option and (effort != cur_effort or model_changed):
+            await self._set_effort(effort)
 
     async def _set_model(self, model: str) -> None:
         try:
             if self.model_option:
-                await self.proc.call("session/set_config_option", {"sessionId": self.sid, "configId": self.model_option,
-                                                                   "value": model}, 30)
+                res = await self.proc.call("session/set_config_option", {"sessionId": self.sid, "configId": self.model_option,
+                                                                         "value": model}, 30)
+                self.effort_option = acp.effort_option_id(res or {}) or self.effort_option
             else:
                 await self.proc.call("session/set_model", {"sessionId": self.sid, "modelId": model}, 30)
         except acp.AcpError as e:
             sessions.log.info("[%s] acp set model %s: %s", self.id, model, e.message)
+            self._event({"kind": "error", "code": "acp", "text": e.message[:300]})
+
+    async def _set_effort(self, effort: str) -> None:
+        if not self.effort_option:
+            return
+        try:
+            await self.proc.call("session/set_config_option", {"sessionId": self.sid, "configId": self.effort_option,
+                                                               "value": effort}, 30)
+        except acp.AcpError as e:
+            sessions.log.info("[%s] acp set effort %s: %s", self.id, effort, e.message)
             self._event({"kind": "error", "code": "acp", "text": e.message[:300]})
 
     async def _shutdown(self) -> None:
@@ -229,6 +252,10 @@ class AcpSession(Session):
             tid = f"plan-{time.monotonic():.6f}"
             self.seen.add(tid)
             self._event({"kind": "tool", "tid": tid, "name": "TodoWrite", "input": _trim({"todos": todos})})
+        elif kind == "config_option_update":
+            opt = acp.effort_option_id(u)
+            if opt:
+                self.effort_option = opt
         elif kind == "usage_update":
             used, size = int(u.get("used") or 0), int(u.get("size") or 0)
             if used and size:
@@ -361,13 +388,27 @@ class AcpSession(Session):
         """Режим доступа решает мост на каждой просьбе агента — менять в процессе нечего."""
 
     async def configure(self, model: str | None, effort: str | None) -> None:
-        """Модель — сразу в живую сессию агента (или со следующего запуска). Уровня размышлений у агентов ACP нет."""
-        if not model or model == self.row["model"]:
+        """Модель и уровень размышлений — сразу в живую сессию агента (или со следующего запуска)."""
+        changes = {}
+        if model and model != self.row["model"]:
+            if not agents.valid_model(self.agent, model):
+                raise BridgeError(codex_session.NO_MODEL)
+            changes["model"] = model
+        target = changes.get("model", self.row["model"])
+        if effort and effort != self.row["effort"]:
+            if not agents.valid_effort(self.agent, target, effort):
+                raise BridgeError("no such level")
+            changes["effort"] = effort
+        elif self.row["effort"] and "model" in changes and not agents.valid_effort(self.agent, target, self.row["effort"]):
+            changes["effort"] = ""
+        if not changes:
             return
-        if not agents.valid_model(self.agent, model):
-            raise BridgeError(codex_session.NO_MODEL)
-        self.bridge.update(self.id, model=model)
-        if self.client and self.sid and model != "default":
-            await self._set_model(model)
-        name = next((m["name"] for m in agents.models(self.agent) if m["id"] == model), model)
-        self._event(codex_session.note_next(name))
+        self.bridge.update(self.id, **changes)
+        if self.client and self.sid:
+            if "model" in changes and self.row["model"] != "default":
+                await self._set_model(self.row["model"])
+            if self.row["effort"] and ("effort" in changes or "model" in changes):
+                await self._set_effort(self.row["effort"])
+        name = next((m["name"] for m in agents.models(self.agent) if m["id"] == self.row["model"]), self.row["model"])
+        what = ", ".join(x for x in (name, self.row["effort"]) if x)
+        self._event(codex_session.note_next(what))

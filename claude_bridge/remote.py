@@ -233,6 +233,8 @@ class Tunnel:
         site = web.SockSite(runner, sock)
         await site.start()
         self.base = f"http://127.0.0.1:{port}"
+        from . import sessions
+        sessions.LOCAL_BRIDGE = {"url": self.base, "token": self.local_token}
         log.info("local bridge: %s", self.base)
         return runner
 

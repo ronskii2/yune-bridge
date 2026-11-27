@@ -512,6 +512,16 @@ def make_app(bridge: Bridge) -> web.Application:
                 info = await asyncio.to_thread(bridge.store_file, session.id, path)
                 info.pop("path", None)
                 return _json({"ok": True, **info})
+            elif name == "sendfile":           # показать файл владельцу в ленте (stdio MCP send_file для ACP и Codex)
+                path = os.path.expanduser(str(body.get("path") or "").strip())
+                if not path:
+                    return _error("empty path")
+                if not os.path.isabs(path):
+                    path = os.path.join(session.row["cwd"], path)
+                info = await asyncio.to_thread(bridge.store_file, session.id, path)
+                info.pop("path", None)
+                session._event({"kind": "file", **info, "caption": str(body.get("caption") or "")[:1000]})
+                return _json({"ok": True, **info})
             elif name == "open":               # путь из ленты — открыть на этой машине (как двойной клик в Finder)
                 await open_local(session.row["cwd"], str(body.get("path") or ""), bool(body.get("reveal")))
             elif name == "handoff":
@@ -604,6 +614,8 @@ async def main() -> None:
     site = web.UnixSite(runner, SOCKET)
     await site.start()
     os.chmod(SOCKET, 0o666)         # папка run/ видна только контейнерам сайта; там процессы от root
+    from . import sessions as _sessions
+    _sessions.LOCAL_BRIDGE = {"socket": SOCKET, "token": TOKEN}
     log.info("listening on %s%s", SOCKET, "" if TOKEN else " — NO TOKEN (CLAUDE_BRIDGE_TOKEN is not set)")
     sweeper = asyncio.create_task(bridge.sweep())
     stop = asyncio.Event()

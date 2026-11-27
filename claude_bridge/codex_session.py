@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
 
 from . import agents, sessions
@@ -98,7 +99,9 @@ class CodexSession(Session):
 
     async def _submit(self, text: str, images: list[str]) -> None:
         if not self.row["claude_id"]:
-            text = PREAMBLE + (sessions.YUNE_NOTE + "\n" if sessions.YUNE_MCP else "") + text
+            extra = (sessions.SEND_FILE_NOTE + "\n" if sessions.LOCAL_BRIDGE else "") + (
+                sessions.YUNE_NOTE + "\n" if sessions.YUNE_MCP else "")
+            text = PREAMBLE + extra + text
         self.queue.append((text, images))
         self._set_status("running")
         if not self.proc:
@@ -130,6 +133,11 @@ class CodexSession(Session):
             argv += ["-m", r["model"]]
         if r["effort"]:
             argv += ["-c", f'model_reasoning_effort="{r["effort"]}"']
+        if sessions.LOCAL_BRIDGE:       # stdio MCP send_file: токен — из окружения, не в командной строке
+            env_keys = list(sessions.lozhka_mcp_env(self.id))
+            argv += ["-c", f"mcp_servers.lozhka.command={json.dumps(sys.executable)}",
+                     "-c", f"mcp_servers.lozhka.args={json.dumps([sessions.lozhka_mcp_script()])}",
+                     "-c", f"mcp_servers.lozhka.env_vars={json.dumps(env_keys)}"]
         if sessions.YUNE_MCP:          # MCP Yune по адресу сайта: ключ машины — из окружения, не в командной строке
             argv += ["-c", f'mcp_servers.yune.url="{sessions.YUNE_MCP["url"]}"',
                      "-c", 'mcp_servers.yune.bearer_token_env_var="YUNE_MCP_TOKEN"']
@@ -144,10 +152,15 @@ class CodexSession(Session):
         self.failed, self.seen, self.stderr_tail = False, set(), []
         self.last_error, self.limit_seen_turn = None, False
         self.started_at = time.monotonic()
+        extra_env: dict[str, str] = {}
+        if sessions.YUNE_MCP:
+            extra_env["YUNE_MCP_TOKEN"] = sessions.YUNE_MCP["token"]
+        if sessions.LOCAL_BRIDGE:
+            extra_env.update(sessions.lozhka_mcp_env(self.id))
         self.proc = await asyncio.create_subprocess_exec(
             *self._argv(images), cwd=self.row["cwd"], stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=32 * 1024 * 1024, start_new_session=os.name != "nt",
-            env={**os.environ, "YUNE_MCP_TOKEN": sessions.YUNE_MCP["token"]} if sessions.YUNE_MCP else None)
+            env={**os.environ, **extra_env} if extra_env else None)
         self._live({"kind": "session", "session": self.public()})
         self.proc.stdin.write(self._input(text, images).encode())
         await self.proc.stdin.drain()

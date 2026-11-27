@@ -183,9 +183,15 @@ Reply in the language the owner writes in, even if the machine's settings or rul
 # Инструменты Yune (картинки, видео, музыка, голос…) идут через сайт (его MCP) — обновление доходит до машин
 # с выкаткой сайта, мост трогать не нужно. Мост по сокету (server.py) — None.
 YUNE_MCP: dict | None = None
+# Локальный HTTP моста (remote.py → {"url", "token"}, server.py → {"socket", "token"}): stdio MCP (mcp_stdio.py)
+# для ACP-агентов и Codex вызывает POST /sessions/{id}/sendfile, чтобы они умели присылать файлы в ленту, как Claude Code.
+LOCAL_BRIDGE: dict | None = None
 YUNE_NOTE = ("Yune tools (images, video, music, voice, reading links, presentations, 3D) — mcp__yune__*: they spend "
              "the owner's Yune balance (the machine has a daily limit); files come as links — download them with curl. "
              "Paid tools — only when the owner asks.\n")
+SEND_FILE_NOTE = ("To show the owner a file (a screenshot of your work, an image, video, PDF, archive, log) in the "
+                  "session feed on the site — use the send_file tool from the lozhka MCP server: images and video "
+                  "appear right in the feed, anything else as a download.\n")
 
 
 # ключи — как просить без расширения; расширение со своим тулом ключей отдаёт свой текст (keys_prompt)
@@ -204,6 +210,24 @@ def yune_mcp_server(session_id: str) -> dict:
     открыл агенту в этой сессии (розетка «Проекты»: «нельзя» — не видны)."""
     return {"type": "http", "url": YUNE_MCP["url"],
             "headers": {"Authorization": f"Bearer {YUNE_MCP['token']}", "X-Yune-Session": session_id}}
+
+
+def lozhka_mcp_env(session_id: str) -> dict[str, str]:
+    """Переменные окружения для stdio MCP send_file (mcp_stdio.py): адрес или сокет моста, токен и id сессии."""
+    cfg = LOCAL_BRIDGE or {}
+    env = {"YUNE_BRIDGE_SESSION": session_id}
+    if cfg.get("url"):
+        env["YUNE_BRIDGE_URL"] = str(cfg["url"])
+    if cfg.get("socket"):
+        env["YUNE_BRIDGE_SOCK"] = str(cfg["socket"])
+    if cfg.get("token"):
+        env["YUNE_BRIDGE_TOKEN"] = str(cfg["token"])
+    return env
+
+
+def lozhka_mcp_script() -> str:
+    """Прямой путь к mcp_stdio.py: запускается из любой папки проекта (cwd агента), без PYTHONPATH."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_stdio.py")
 
 
 # Устройство, с которого владелец начал сессию (сайт берёт из User-Agent): строкой перед первым

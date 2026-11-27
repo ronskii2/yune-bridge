@@ -19,6 +19,8 @@ MCP Yune — в session/new | session/load (mcpServers), если агент у�
 from __future__ import annotations
 
 import asyncio
+import re
+import sys
 import time
 import uuid
 
@@ -68,10 +70,15 @@ class AcpSession(Session):
     # ── процесс и сессия агента ──────────────────────────────────────────────────────────────────────────────
 
     def _mcp_servers(self) -> list[dict]:
-        if not (sessions.YUNE_MCP and (self.caps.get("mcpCapabilities") or {}).get("http")):
-            return []
-        return [{"type": "http", "name": "yune", "url": sessions.YUNE_MCP["url"],
-                 "headers": [{"name": "Authorization", "value": f"Bearer {sessions.YUNE_MCP['token']}"}]}]
+        servers: list[dict] = []
+        if sessions.LOCAL_BRIDGE:
+            env = [{"name": k, "value": v} for k, v in sessions.lozhka_mcp_env(self.id).items()]
+            servers.append({"name": "lozhka", "command": sys.executable, "args": [sessions.lozhka_mcp_script()], "env": env})
+        if sessions.YUNE_MCP and (self.caps.get("mcpCapabilities") or {}).get("http"):
+            servers.append({"type": "http", "name": "yune", "url": sessions.YUNE_MCP["url"],
+                            "headers": [{"name": "Authorization", "value": f"Bearer {sessions.YUNE_MCP['token']}"},
+                                        {"name": "X-Yune-Session", "value": self.id}]})
+        return servers
 
     async def _ensure(self) -> None:
         if self.client and self.sid:
@@ -165,7 +172,9 @@ class AcpSession(Session):
 
     async def _submit(self, text: str, images: list[str]) -> None:
         if not self.row["claude_id"]:
-            text = codex_session.PREAMBLE + (sessions.YUNE_NOTE + "\n" if sessions.YUNE_MCP else "") + text
+            extra = (sessions.SEND_FILE_NOTE + "\n" if sessions.LOCAL_BRIDGE else "") + (
+                sessions.YUNE_NOTE + "\n" if sessions.YUNE_MCP else "")
+            text = codex_session.PREAMBLE + extra + text
         self.queue.append(text)
         self._set_status("running")
         if not self.lock.locked():
@@ -277,10 +286,17 @@ class AcpSession(Session):
             self.live_at = len(self.live)
 
     @staticmethod
+    def _is_send_file(u: dict) -> bool:
+        title = str(u.get("title") or "").strip().lower()
+        return bool(title and re.search(r"(?:^|[:/_.\s-])send_file$", title))
+
+    @staticmethod
     def _name_input(u: dict) -> tuple[str, dict]:
         kind = str(u.get("kind") or "other")
         raw = u.get("rawInput") if isinstance(u.get("rawInput"), dict) else {}
         inp = dict(raw)
+        if AcpSession._is_send_file(u):
+            return "mcp__lozhka__send_file", inp
         locs = [loc.get("path") for loc in u.get("locations") or [] if isinstance(loc, dict) and loc.get("path")]
         if locs and "file_path" not in inp:
             inp["file_path"] = locs[0]
@@ -335,7 +351,7 @@ class AcpSession(Session):
         call = params.get("toolCall") or {}
         kind = str(call.get("kind") or "other")
         access = self.access
-        if kind in READ_KINDS or access == "full" or (access == "auto" and kind not in RISKY_KINDS):
+        if kind in READ_KINDS or self._is_send_file(call) or access == "full" or (access == "auto" and kind not in RISKY_KINDS):
             return pick("allow_once", "allow_always")
         if access == "read":
             return pick("reject_once", "reject_always")

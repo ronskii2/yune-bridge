@@ -196,7 +196,12 @@ YUNE_MCP: dict | None = None
 LOCAL_BRIDGE: dict | None = None
 YUNE_NOTE = ("Yune tools (images, video, music, voice, reading links, presentations, 3D) — mcp__yune__*: they spend "
              "the owner's Yune balance (the machine has a daily limit); files come as links — download them with curl. "
-             "Paid tools — only when the owner asks.\n")
+             "Paid tools — only when the owner asks. Yune Projects tools (project_list, project_brief, project_file_put, "
+             "project_file_get, project_product, project_link) are free: when the task relates to one of the owner's "
+             "Yune projects, save deliverables (research, product images, PDFs, spreadsheets, mockups) into that Yune "
+             "project via project_file_put (accepts text, url, media id, or local path on this machine) and group "
+             "product assets with project_product. Always state clearly in your reply where each file lives — in a Yune "
+             "Project (with /projects/ID link) or locally on this computer (show local files with send_file).\n")
 SEND_FILE_NOTE = ("To show the owner a file (a screenshot of your work, an image, video, PDF, archive, log) in the "
                   "session feed on the site — use the send_file tool from the lozhka MCP server: images and video "
                   "appear right in the feed, anything else as a download.\n")

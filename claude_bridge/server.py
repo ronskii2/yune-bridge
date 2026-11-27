@@ -140,7 +140,11 @@ def _resolve_local(cwd: str, path: str) -> str:
         return None
 
     cleaned = _strip_loc(raw)
-    variants = [raw] + ([cleaned] if cleaned and cleaned != raw else [])
+    ic_clean = projects.clean_path(cleaned) if cleaned else ""
+    variants = []
+    for v in (raw, cleaned, ic_clean):
+        if v and v not in variants:
+            variants.append(v)
     for item in variants:
         expanded = os.path.expanduser(item)
         if os.path.isabs(expanded):
@@ -508,12 +512,15 @@ def make_app(bridge: Bridge) -> web.Application:
             elif name == "delete":
                 await bridge.delete(session.id)
                 return _json({"ok": True})
-            elif name == "export":             # файл с этой машины — сайту (инструмент Yune media_from_machine)
-                path = os.path.expanduser(str(body.get("path") or "").strip())
-                if not path:
+            elif name == "export":             # файл с этой машины — сайту (инструменты Yune: медиа и project_file_put)
+                raw_path = str(body.get("path") or "").strip()
+                if not raw_path:
                     return _error("empty path")
+                path = os.path.expanduser(projects.clean_path(raw_path) or raw_path)
                 if not os.path.isabs(path):
                     path = os.path.join(session.row["cwd"], path)
+                if not os.path.isfile(path):
+                    path = await asyncio.to_thread(_resolve_local, session.row["cwd"], raw_path)
                 info = await asyncio.to_thread(bridge.store_file, session.id, path)
                 info.pop("path", None)
                 return _json({"ok": True, **info})

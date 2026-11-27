@@ -34,7 +34,31 @@ KIND_NAMES = {"read": "Read", "edit": "Edit", "delete": "Delete", "move": "Edit"
 READ_KINDS = ("read", "search", "fetch", "think", "switch_mode")
 RISKY_KINDS = ("execute", "delete", "other")        # «Авто»: правки сами, это — карточкой владельцу
 LIMIT_WORDS = ("quota", "resource_exhausted", "rate limit", "usage limit", "exhausted your", "too many requests")
+QUOTA_MSG_RE = re.compile(
+    r"^(?:error:\s*)?(?:individual\s+quota\s+reached|you(?:'ve| have)\s+(?:hit|reached)\s+your\s+.*limit|"
+    r"quota\s+(?:exceeded|reached|exhausted)|rate\s+limit\s+(?:reached|exceeded)|resource_exhausted)\b",
+    re.I,
+)
 CANCEL_WAIT = 15
+
+
+def _error_text(e: Exception) -> str:
+    """Полный текст ошибки ACP: JSON-RPC часто кладёт подробности (квота, Resets in …) в error.data."""
+    msg = str(getattr(e, "message", None) or str(e) or type(e).__name__).strip()
+    data = getattr(e, "data", None)
+    detail = ""
+    if isinstance(data, str):
+        detail = data.strip()
+    elif isinstance(data, dict):
+        for k in ("details", "message", "error", "reason", "text"):
+            if isinstance(data.get(k), str) and data[k].strip():
+                detail = data[k].strip()
+                break
+        if not detail:
+            detail = str(data).strip()
+    if detail and detail.lower() not in msg.lower():
+        return f"{msg}: {detail}" if msg and msg.lower() not in detail.lower() else detail
+    return msg
 
 
 class AcpSession(Session):
@@ -194,7 +218,7 @@ class AcpSession(Session):
                     self.said = []
                 except Exception as e:  # noqa: BLE001
                     sessions.log.exception("[%s] acp turn %s", self.id, self.agent)
-                    self._error(getattr(e, "message", None) or str(e) or type(e).__name__, start=True)
+                    self._error(_error_text(e), start=True)
                     self._event({"kind": "result", "cost": 0, "ms": 0, "turns": 0, "error": True})
                     if not (self.proc and self.proc.alive):
                         await self._shutdown()
@@ -208,10 +232,16 @@ class AcpSession(Session):
         self.turn_started = time.monotonic()
         self._set_status("running")
         res = await self.proc.call("session/prompt", {"sessionId": self.sid, "prompt": [{"type": "text", "text": text}]})
-        self._flush_text()
+        stripped = self.buf.strip()
+        quota_text = bool(stripped and len(stripped) <= 400 and "\n\n" not in stripped and QUOTA_MSG_RE.search(stripped))
+        if quota_text:
+            self.buf, self.live, self.live_at = "", "", 0
+            self._error(stripped)
+        else:
+            self._flush_text()
         reason = str(res.get("stopReason") or "end_turn")
-        failed = reason in ("refusal", "error")
-        if reason == "refusal":
+        failed = quota_text or reason in ("refusal", "error")
+        if reason == "refusal" and not quota_text:
             self._error("refusal")
         self._event({"kind": "result", "cost": 0, "ms": int((time.monotonic() - self.turn_started) * 1000),
                      "turns": len(self.seen), "error": failed})

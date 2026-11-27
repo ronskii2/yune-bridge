@@ -446,7 +446,12 @@ def make_app(bridge: Bridge) -> web.Application:
                 if when == "now":
                     await session.resume()
                 elif when == "auto":
-                    session.schedule_resume()
+                    at = None
+                    if isinstance(body.get("at"), (int, float)):
+                        now = time.time()
+                        if now < float(body["at"]) <= now + 14 * 86400:
+                            at = float(body["at"])
+                    session.schedule_resume(at)
                 elif when == "cancel":
                     session.cancel_resume()
                 else:

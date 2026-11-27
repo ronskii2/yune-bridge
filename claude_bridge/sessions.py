@@ -163,6 +163,14 @@ RESUME = "The usage limit has reset — continue from where you stopped."
 RETRY = "Continue from where you stopped."
 RESETS_RE = re.compile(r"resets\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\s+(?P<day>\d{1,2}),?\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?"
                        r"\s*(?P<ap>am|pm)?\s*(?:\((?P<tz>[^)]+)\))?", re.I)
+RESETS_IN_RE = re.compile(
+    r"(?:resets?|try again|retry|available)\s+in\s+"
+    r"(?:(?P<d>\d+)\s*d(?:ays?)?\s*)?"
+    r"(?:(?P<h>\d+)\s*h(?:ours?|rs?)?\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:ute)?s?)?\s*)?"
+    r"(?:(?P<s>\d+)\s*s(?:ec(?:ond)?s?)?)?",
+    re.I,
+)
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 APPEND = """
@@ -375,7 +383,13 @@ def _trim(value, limit: int = TRIM):
 
 
 def resets_from_text(text: str, now: float | None = None) -> float | None:
-    """«You've hit your 5-hour limit · resets 8:40pm (Asia/Tokyo)» / «resets Nov 14, 2pm (Asia/Tokyo)» → unix-время."""
+    """«You've hit your 5-hour limit · resets 8:40pm (Asia/Tokyo)» / «Resets in 2h8m31s» → unix-время."""
+    m_in = RESETS_IN_RE.search(text or "")
+    if m_in and any(m_in.group(k) for k in ("d", "h", "m", "s")):
+        delta = (int(m_in["d"] or 0) * 86400 + int(m_in["h"] or 0) * 3600
+                 + int(m_in["m"] or 0) * 60 + int(m_in["s"] or 0))
+        if delta > 0:
+            return (now or time.time()) + delta
     m = RESETS_RE.search(text or "")
     if not m:
         return None
@@ -862,10 +876,29 @@ class Session:
         if self.auto_resume:                # автопродолжение снова упёрлось в лимит — ждём следующего окна
             self.schedule_resume()
 
+    def _last_limit_reset(self) -> float | None:
+        """Если мост перезапускался после события limit — берём resets_at из последней записи ленты."""
+        row = self.bridge.db.execute(
+            "SELECT data, ts FROM events WHERE session_id = ? AND kind = 'limit' ORDER BY id DESC LIMIT 1",
+            (self.id,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            data = json.loads(row["data"] or "{}")
+        except ValueError:
+            return None
+        if data.get("status") != "rejected":
+            return None
+        return data.get("resets_at") or resets_from_text(str(data.get("text") or ""), row["ts"])
+
     def schedule_resume(self, at: float | None = None) -> None:
         """«Продолжить, когда восстановится»: время — из лимита (+ минута), иначе — попытка через полчаса."""
         now = time.time()
-        at = at or ((self.limit_reset + RESUME_GAP) if self.limit_reset and self.limit_reset > now else now + RETRY_SEC)
+        reset = self.limit_reset or self._last_limit_reset()
+        if reset and not self.limit_reset:
+            self.limit_reset = reset
+        at = at or ((reset + RESUME_GAP) if reset and reset > now else now + RETRY_SEC)
         self.bridge.update(self.id, resume_at=max(at, now + 5))
 
     def cancel_resume(self) -> None:

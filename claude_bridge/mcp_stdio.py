@@ -1,17 +1,24 @@
-"""Минимальный stdio MCP-сервер моста: отдаёт ACP-агентам и Codex инструмент send_file.
-
-Запускается агентом как подпроцесс (JSON-RPC 2.0 построчно по stdin/stdout, без сторонних пакетов — только stdlib).
-Вызов send_file проксирует в локальный HTTP моста (POST /sessions/{id}/sendfile) — по TCP (remote.py) или unix-сокету
-(server.py); мост сохраняет файл в папку сессии и шлёт событие kind: "file" в ленту сайта.
+"""Минимальный stdio MCP-сервер моста:
+  1. Без флагов — отдаёт ACP-агентам и Codex инструмент send_file (проксирует в локальный HTTP моста
+     POST /sessions/{id}/sendfile по TCP или unix-сокету).
+  2. С флагом --proxy — stdio-прокси к удалённому HTTP MCP (Yune /mcp) для ACP-агентов без поддержки
+     http MCP (например Antigravity). Только stdlib, параллельные вызовы через ThreadPoolExecutor.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
 import os
 import socket
+import ssl
 import sys
+import threading
 from urllib.parse import urlparse
+
+PROXY_TIMEOUT = 310
+_STDOUT_LOCK = threading.Lock()
+_EMPTY_LISTS = {"resources/list": {"resources": []}, "prompts/list": {"prompts": []}}
 
 TOOL = {
     "name": "send_file",
@@ -81,9 +88,83 @@ def _post_sendfile(path: str, caption: str) -> tuple[bool, str]:
     return True, f"The owner sees {data.get('name') or os.path.basename(path)} in the feed."
 
 
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    """HTTPS-соединение на заданный IP (config resolve) с проверкой сертификата по имени хоста (SNI)."""
+
+    def __init__(self, host: str, port: int | None, ip: str, timeout: float = PROXY_TIMEOUT):
+        super().__init__(host, port=port, timeout=timeout, context=ssl.create_default_context())
+        self._ip = ip
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self._ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+
+
+def _post_mcp(msg: dict) -> dict | None:
+    url = (os.environ.get("YUNE_MCP_URL") or "").strip()
+    token = (os.environ.get("YUNE_MCP_TOKEN") or "").strip()
+    sid = (os.environ.get("YUNE_BRIDGE_SESSION") or "").strip()
+    resolve = (os.environ.get("YUNE_MCP_RESOLVE") or "").strip()
+    mid = msg.get("id")
+    is_notif = "id" not in msg
+    if not url:
+        return None if is_notif else {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "MCP URL is not configured"}}
+
+    u = urlparse(url)
+    host = u.hostname or "127.0.0.1"
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    body = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Host": u.netloc,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Content-Length": str(len(body)),
+        "User-Agent": "yune-bridge/1.0",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if sid:
+        headers["X-Yune-Session"] = sid
+
+    conn: http.client.HTTPConnection | None = None
+    try:
+        if u.scheme == "https":
+            if resolve:
+                conn = _PinnedHTTPS(host, u.port, resolve, timeout=PROXY_TIMEOUT)
+            else:
+                conn = http.client.HTTPSConnection(host, port=u.port, timeout=PROXY_TIMEOUT,
+                                                   context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(resolve or host, port=u.port, timeout=PROXY_TIMEOUT)
+        conn.request("POST", path, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException) as e:
+        return None if is_notif else {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": f"MCP request failed: {e}"}}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if is_notif or resp.status == 202 or not raw.strip():
+        return None
+    if resp.status >= 400:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": f"MCP HTTP {resp.status}"}}
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32700, "message": "Invalid JSON from MCP server"}}
+    # Клиенты MCP часто запрашивают resources/list и prompts/list на старте — пустой список лучше ошибки -32601
+    method = msg.get("method")
+    if isinstance(reply, dict) and isinstance(reply.get("error"), dict) and reply["error"].get("code") == -32601 and method in _EMPTY_LISTS:
+        return {"jsonrpc": "2.0", "id": mid, "result": _EMPTY_LISTS[method]}
+    return reply if isinstance(reply, dict) else None
+
+
 def _write(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with _STDOUT_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def _handle(msg: dict) -> dict | None:
@@ -130,7 +211,30 @@ def _handle(msg: dict) -> dict | None:
     return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
 
 
+def _main_proxy() -> None:
+    def _run(msg: dict) -> None:
+        reply = _post_mcp(msg)
+        if reply is not None:
+            _write(reply)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            pool.submit(_run, msg)
+
+
 def main() -> None:
+    if "--proxy" in sys.argv[1:]:
+        _main_proxy()
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:

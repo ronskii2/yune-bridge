@@ -220,6 +220,19 @@ def yune_mcp_server(session_id: str) -> dict:
             "headers": {"Authorization": f"Bearer {YUNE_MCP['token']}", "X-Yune-Session": session_id}}
 
 
+def yune_mcp_stdio_env(session_id: str) -> dict[str, str]:
+    """Переменные окружения для stdio-прокси к HTTP MCP Yune (mcp_stdio.py --proxy) — для ACP-агентов без http MCP."""
+    cfg = YUNE_MCP or {}
+    env = {
+        "YUNE_MCP_URL": str(cfg.get("url") or ""),
+        "YUNE_MCP_TOKEN": str(cfg.get("token") or ""),
+        "YUNE_BRIDGE_SESSION": session_id,
+    }
+    if cfg.get("resolve"):
+        env["YUNE_MCP_RESOLVE"] = str(cfg["resolve"])
+    return env
+
+
 def lozhka_mcp_env(session_id: str) -> dict[str, str]:
     """Переменные окружения для stdio MCP send_file (mcp_stdio.py): адрес или сокет моста, токен и id сессии."""
     cfg = LOCAL_BRIDGE or {}

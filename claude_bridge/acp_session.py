@@ -14,7 +14,8 @@
 правками и командами — ответ по режиму сессии: full — разрешить; auto — правки сами, команды (execute, delete) — карточкой
 владельцу; ask — карточка на каждое изменяющее действие (как у Claude Code); read — отказ. Чтение и поиск — всегда сами.
 Сообщение посреди хода — как у Codex: «Отправить сейчас» прерывает ход (session/cancel) и начинает новый.
-MCP Yune — в session/new | session/load (mcpServers), если агент умеет http (mcpCapabilities.http).
+MCP Yune — в session/new | session/load (mcpServers): напрямую по http, если агент умеет (mcpCapabilities.http),
+иначе через stdio-прокси mcp_stdio.py --proxy (так Yune MCP работает в Antigravity и других stdio-only ACP-агентах).
 """
 from __future__ import annotations
 
@@ -98,10 +99,15 @@ class AcpSession(Session):
         if sessions.LOCAL_BRIDGE:
             env = [{"name": k, "value": v} for k, v in sessions.lozhka_mcp_env(self.id).items()]
             servers.append({"name": "lozhka", "command": sys.executable, "args": [sessions.lozhka_mcp_script()], "env": env})
-        if sessions.YUNE_MCP and (self.caps.get("mcpCapabilities") or {}).get("http"):
-            servers.append({"type": "http", "name": "yune", "url": sessions.YUNE_MCP["url"],
-                            "headers": [{"name": "Authorization", "value": f"Bearer {sessions.YUNE_MCP['token']}"},
-                                        {"name": "X-Yune-Session", "value": self.id}]})
+        if sessions.YUNE_MCP:
+            if (self.caps.get("mcpCapabilities") or {}).get("http"):
+                servers.append({"type": "http", "name": "yune", "url": sessions.YUNE_MCP["url"],
+                                "headers": [{"name": "Authorization", "value": f"Bearer {sessions.YUNE_MCP['token']}"},
+                                            {"name": "X-Yune-Session", "value": self.id}]})
+            else:
+                env = [{"name": k, "value": v} for k, v in sessions.yune_mcp_stdio_env(self.id).items()]
+                servers.append({"name": "yune", "command": sys.executable,
+                                "args": [sessions.lozhka_mcp_script(), "--proxy"], "env": env})
         return servers
 
     async def _ensure(self) -> None:

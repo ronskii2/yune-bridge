@@ -212,7 +212,8 @@ class Tunnel:
         from . import server, sessions
         from .sessions import Bridge
         # MCP Yune в сессиях этой машины — ключом машины (сайт сверяет его так же, как у WebSocket)
-        sessions.YUNE_MCP = {"url": cfg["site"].rstrip("/") + "/mcp", "token": f"m.{cfg['machine_id']}.{cfg['token']}"}
+        sessions.YUNE_MCP = {"url": cfg["site"].rstrip("/") + "/mcp", "token": f"m.{cfg['machine_id']}.{cfg['token']}",
+                             "resolve": cfg.get("resolve") or ""}
         self.cfg = cfg
         self.server = server
         self.bridge = Bridge(CONFIG_DIR)

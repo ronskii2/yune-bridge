@@ -36,7 +36,8 @@ READ_KINDS = ("read", "search", "fetch", "think", "switch_mode")
 RISKY_KINDS = ("execute", "delete", "other")        # «Авто»: правки сами, это — карточкой владельцу
 LIMIT_WORDS = ("quota", "resource_exhausted", "rate limit", "usage limit", "exhausted your", "too many requests")
 QUOTA_MSG_RE = re.compile(
-    r"^(?:error:\s*)?(?:individual\s+quota\s+reached|you(?:'ve| have)\s+(?:hit|reached)\s+your\s+.*limit|"
+    r"^(?:[\s\u26a0\ufe0f\u26d4\U0001f6ab\u2757\u274c\u2716\u23f1\u23f3!]*)(?:\[(?:!|warning|error)\]\s*)?(?:(?:warning|error)\s*:\s*)?"
+    r"(?:individual\s+quota\s+reached|you(?:'ve| have)\s+(?:hit|reached)\s+your\s+.*limit|"
     r"quota\s+(?:exceeded|reached|exhausted)|rate\s+limit\s+(?:reached|exceeded)|resource_exhausted)\b",
     re.I,
 )

@@ -161,7 +161,7 @@ RESUME_GAP = 60                     # автопродолжение — чер�
 RETRY_SEC = 30 * 60                 # когда обновится, неизвестно (Codex, текст без времени) — пробуем раз в полчаса
 RESUME = "The usage limit has reset — continue from where you stopped."
 RETRY = "Continue from where you stopped."
-RESETS_RE = re.compile(r"resets\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\s+(?P<day>\d{1,2}),?\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?"
+RESETS_RE = re.compile(r"resets\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?"
                        r"\s*(?P<ap>am|pm)?\s*(?:\((?P<tz>[^)]+)\))?", re.I)
 RESETS_IN_RE = re.compile(
     r"(?:resets?|try again|retry|available)\s+in\s+"
@@ -896,19 +896,19 @@ class Session:
 
     def _last_limit_reset(self) -> float | None:
         """Если мост перезапускался после события limit — берём resets_at из последней записи ленты."""
-        row = self.bridge.db.execute(
-            "SELECT data, ts FROM events WHERE session_id = ? AND kind = 'limit' ORDER BY id DESC LIMIT 1",
+        rows = self.bridge.db.execute(
+            "SELECT data, ts FROM events WHERE session = ? AND data LIKE '%\"limit\"%' ORDER BY id DESC LIMIT 10",
             (self.id,),
-        ).fetchone()
-        if not row:
-            return None
-        try:
-            data = json.loads(row["data"] or "{}")
-        except ValueError:
-            return None
-        if data.get("status") != "rejected":
-            return None
-        return data.get("resets_at") or resets_from_text(str(data.get("text") or ""), row["ts"])
+        ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row["data"] or "{}")
+            except ValueError:
+                continue
+            if data.get("kind") != "limit" or data.get("status") != "rejected":
+                continue
+            return data.get("resets_at") or resets_from_text(str(data.get("text") or ""), row["ts"])
+        return None
 
     def schedule_resume(self, at: float | None = None) -> None:
         """«Продолжить, когда восстановится»: время — из лимита (+ минута), иначе — попытка через полчаса."""
@@ -931,7 +931,7 @@ class Session:
         if self.status != "idle":
             return
         self.auto_resume = auto
-        lead = RESUME if self.limit_reset else RETRY
+        lead = RESUME if (self.limit_reset or auto) else RETRY
         await self._flush([q for q in self.outbox if not q.get("hold")], lead=lead)
 
     async def _after_turn(self) -> None:
@@ -1442,7 +1442,7 @@ class Bridge:
         if sid in self.sessions:
             self.sessions[sid].row.update(fields)
             if set(fields) & {"title", "model", "effort", "resume_at", "access", "cache_at"}:
-                self.publish({"session": sid, "kind": "session", "session": self.sessions[sid].public()})
+                self.publish({"kind": "session", "session": self.sessions[sid].public()})
 
     def add_event(self, sid: str, data: dict) -> dict:
         ts = time.time()
